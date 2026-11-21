@@ -54,12 +54,13 @@ notes-only bundles cannot return an entry with no metadata.
 
 ### 3. A bundle without a glance is still searchable
 
-1388 DOI bundle directories are tracked, but only 1387 become entries: 76 glances
-cover 75 bundles (one bundle has two glances), 1312 bundles have no glance at all
-and are indexed as `kind="paper-archive"` with metadata derived from the archived
-filename plus a `no glance: metadata derived from archived filename` warning, and
-the remaining bundle (`DOI/DOI-10.1126_science.aah6219`) holds only a notes file
-and is skipped with an `info` diagnostic. Same derivation applies to 515
+1388 DOI bundle directories are tracked and together yield 1388 entries over 1387
+distinct bundles: 76 glances cover 75 bundles (one bundle has two glances) and
+1312 bundles have no glance at all, so they are indexed as
+`kind="paper-archive"` with metadata derived from the archived filename plus a
+`no glance: metadata derived from archived filename` warning. The remaining
+bundle (`DOI/DOI-10.1126_science.aah6219`) holds only a notes file and is
+skipped with an `info` diagnostic. The same derivation applies to 515
 `SelfHosted` bundles and 196 ISBN books.
 
 ### 4. `work_id` groups versions; a record without it is its own work

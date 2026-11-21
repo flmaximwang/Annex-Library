@@ -100,6 +100,7 @@ uses and asserts the acceptance criteria against the configured checkout. It
 reads the checkout and writes only the index. Point it at another checkout with
 `ANNEX_LIBRARY_ROOT` and `ANNEX_LIBRARY_INDEX`.
 
-Performance on the production checkout (2260 entries, 2937 attachments): cold
-build 0.7 s, warm queries p95 0.3–0.8 ms, external change visible within the
-watchdog interval (measured 0.36 s).
+Measured on the production checkout (3960 tracked files, revision
+`47b589b96cc4b1fe0548dfd10403c233ea554ced`; 2260 entries, 2937 attachments):
+cold build 0.7 s, warm queries p95 0.3–0.8 ms, external change visible within
+the watchdog interval (measured 0.36 s).

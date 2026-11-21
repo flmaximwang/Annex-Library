@@ -1,7 +1,7 @@
 # Catalog selection rules and the evidence for them
 
 Every rule below was derived by inspecting the production checkout at
-`/Users/maxim/digitalmind/Library` (revision `ea1c2ae94e4475f0dc52ebd3cc602c0c63ec0f4f`,
+`/Users/maxim/digitalmind/Library` (revision `47b589b96cc4b1fe0548dfd10403c233ea554ced`,
 branch `adjusted/main(unlocked)`, 3960 tracked files) and by reading the
 Library's own `README.md`. The production Library was only ever read; nothing in
 it was modified.
@@ -17,7 +17,7 @@ reproduces in miniature.
 | `DOI/` | `DOI-<doi>/<JOURNAL>-<Author>-<YYYY-MM-DD>-<Title>/<source>-glance.md` | `*-notes.md` (23), `skill/**` (24), `assets/**`, the PDF itself |
 | `ISBN/` | the bundle itself, with its book PDF | chapter distillation (`ch0N/verified.md`, `PIPELINE_STATE.md`, `BOOK_OVERVIEW.md`, `GLOSSARY.md`, `SKILL.md`, `.cangjie/**`) — 703 markdown files, none of them a record |
 | `Misc/` | `Misc/<YYYYMMDDTHHMMSS.ffffffZ>/<topic>.md` | `assets/**` annex attachments |
-| `Bilibili/` `YouTube/` `Vimeo/` | `<id>/<作者或作者名>_<YYYY-MM-DD>_<短标题>/summary.md` | `transcript.md` (25), `.seg/**`, `wNNNN-NNNN.md` (9), `00-要点速览.md` |
+| `Bilibili/` `YouTube/` `Vimeo/` | `<id>/<作者或作者名>_<YYYY-MM-DD>_<短标题>/summary.md` (82 + 16 + 1) | `transcript.md` (25), `.seg/wNNNN-NNNN.md` (9), `00-要点速览.md` (1) |
 | `SelfHosted/` | document bundle, metadata from the archived filename | — (no markdown at all in 515 bundles) |
 
 Measured at that revision:
@@ -25,10 +25,15 @@ Measured at that revision:
 * 3960 tracked files: 2124 PDF, 1024 Markdown, 260 JPG, 170 PNG, 138 JSON,
   36 PPTX, 33 MP4.
 * 1024 Markdown files: 76 `-glance.md`, 23 `-notes.md`, 61 Misc records, 1
-  legacy flat Misc file, 82 Bilibili + 16 YouTube + 1 Vimeo summaries, 24
-  `skill/**`, 117 Bilibili transcript/segment files, 683 ISBN distillation
-  documents, plus `.beads/README.md` and the Library's own `README.md`.
+  legacy flat Misc file, 99 summaries (82 Bilibili, 16 YouTube, 1 Vimeo), 35
+  Bilibili transcript/segment files (25 `transcript.md`, 9 `.seg` windows, 1
+  `00-要点速览.md`), 24 `DOI/**/skill/**`, and 703 ISBN distillation documents.
+  The remaining two are `README.md` and `.beads/README.md`, which belong to the
+  checkout rather than the catalog.
 * 2692 annex-tracked paths; 2544 present locally, 148 absent (placeholders).
+* The index built from this revision holds 2260 entries and 2937 attachments:
+  1312 DOI paper archives, 515 SelfHosted documents, 196 ISBN books, 99 video
+  summaries, 76 DOI glances, 61 Misc records and 1 Misc legacy record.
 
 ## Rules and the evidence behind them
 
@@ -92,7 +97,7 @@ end state of an archive, and hiding it would make the attachment list lie.
 
 61 bundles follow `Misc/<YYYYMMDDTHHMMSS.ffffffZ>/<topic>.md`, and the frontmatter
 `id` embeds the same timestamp. One stray tracked flat file,
-`Misc/2026-11-21_orca-vs-herdr-设计哲学.md`, duplicates
+`Misc/2026-11-21_orca-vs-herdr-设计哲学.md` (commit `168e82086`), duplicates
 `Misc/20261121T125651.861690Z/orca-vs-herdr-设计哲学.md` — the same `id` on two
 records. Both stay searchable and both carry
 `ambiguous identifier …: 2 catalog records share it`. This is the "malformed or

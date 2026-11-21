@@ -1,0 +1,194 @@
+"""The four public MCP tools of the Annex Library service.
+
+Ticket ``annex-library-crx.1`` ships ``annex-lib-search``. The remaining tools
+are declared here so the service has one stable tool surface; they are
+implemented by the follow-up tickets (``.2`` check, ``.3`` save, ``.4`` edit /
+related versions).
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+
+from .index import Index, Query, lookup_by_path, refresh_local_state, search
+from .normalize import parse_iso_date
+from .refresh import IndexManager
+
+TOOL_SEARCH = "annex-lib-search"
+TOOL_SAVE = "annex-lib-save"
+TOOL_EDIT = "annex-lib-edit"
+TOOL_CHECK = "annex-lib-check"
+
+
+class ToolError(Exception):
+    """Error that is safe to show to an MCP caller."""
+
+    def __init__(self, message: str, *, code: str = "error", detail: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.detail = detail or {}
+
+
+def _iso_date(value: str | None, field: str) -> str | None:
+    if not value:
+        return None
+    parsed = parse_iso_date(value)
+    if parsed is None:
+        raise ToolError(f"{field} is not an ISO date: {value!r}", code="invalid_argument")
+    return parsed.isoformat()
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+# --------------------------------------------------------------------------- #
+# annex-lib-search
+# --------------------------------------------------------------------------- #
+
+
+def annex_lib_search(
+    manager: IndexManager,
+    *,
+    doi: str | None = None,
+    title: str | None = None,
+    author: str | None = None,
+    tags: list[str] | None = None,
+    captured_from: str | None = None,
+    captured_to: str | None = None,
+    collection: str | None = None,
+    text: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    include_local_status: bool = False,
+    include_attachments: bool = True,
+) -> dict:
+    """Search the catalog and return works with their versions and attachments."""
+    if not any([doi, title, author, tags, captured_from, captured_to, collection, text]):
+        raise ToolError(
+            "at least one search criterion is required "
+            "(doi, title, author, tags, captured_from/captured_to, collection or text)",
+            code="invalid_argument",
+        )
+    if limit < 1 or limit > 100:
+        raise ToolError("limit must be between 1 and 100", code="invalid_argument")
+    if offset < 0:
+        raise ToolError("offset must be >= 0", code="invalid_argument")
+
+    date_from = _iso_date(captured_from, "captured_from")
+    date_to = _iso_date(captured_to, "captured_to")
+    if date_from and date_to and date_from > date_to:
+        raise ToolError("captured_from is after captured_to", code="invalid_argument")
+
+    index = manager.index
+    manager.ensure_fresh()
+
+    query = Query(
+        doi=doi,
+        title=title,
+        author=author,
+        tags=[tag for tag in (tags or []) if tag and tag.strip()],
+        captured_from=date_from,
+        captured_to=date_to,
+        collection=collection,
+        text=text,
+        limit=limit,
+        offset=offset,
+        include_local=include_local_status,
+    )
+    started = time.perf_counter()
+    works, summary = search(index, query)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+
+    if not include_attachments:
+        for work in works:
+            for version in work.versions:
+                version.pop("attachments", None)
+
+    payload = {
+        "query": summary["filters"],
+        "total_works": summary["total_works"],
+        "returned": summary["returned"],
+        "offset": summary["offset"],
+        "limit": summary["limit"],
+        "works": [work.as_dict() for work in works],
+        "index": {
+            "generation": manager.state.generation,
+            "library_revision": index.meta("library_revision"),
+            "built_at": index.meta("built_at"),
+            "local_status": "requested" if include_local_status else "not requested",
+        },
+        "took_ms": round(elapsed_ms, 2),
+    }
+    if include_local_status:
+        payload["index"]["local_status_method"] = (
+            "indexed snapshot of `git annex find --in=here` captured when the index "
+            "was built; call annex-lib-attachments with refresh_local=true for a "
+            "fresh filesystem probe of one bundle"
+        )
+    return payload
+
+
+def annex_lib_locate_attachments(
+    manager: IndexManager,
+    *,
+    path: str | None = None,
+    entry_id: str | None = None,
+    refresh_local: bool = False,
+) -> dict:
+    """Return tracked attachments for one bundle and their local availability."""
+    if not path and not entry_id:
+        raise ToolError("path or entry_id is required", code="invalid_argument")
+    manager.ensure_fresh()
+    record = lookup_by_path(manager.index, (path or entry_id or "").rstrip("/"))
+    if record is None:
+        raise ToolError(f"no catalog record for {path or entry_id!r}", code="not_found")
+    if refresh_local:
+        refresh_local_state(manager.index, [a["path"] for a in record.get("attachments", [])])
+        record = lookup_by_path(manager.index, (path or entry_id or "").rstrip("/")) or record
+    attachments = record.get("attachments", [])
+    present = sum(1 for a in attachments if a.get("local_content") == "present")
+    missing = [
+        a for a in attachments
+        if a.get("local_content") == "missing" or (a.get("annex_tracked") and not a.get("local_content"))
+    ]
+    return {
+        "entry_id": record["entry_id"],
+        "record_path": record["record_path"],
+        "bundle": record["bundle"],
+        "revision": record["revision"],
+        "attachments": attachments,
+        "summary": {
+            "tracked": len(attachments),
+            "local_present": present,
+            "local_missing": len(attachments) - present,
+        },
+        "missing": missing,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Placeholders implemented by later tickets
+# --------------------------------------------------------------------------- #
+
+
+def annex_lib_check(manager: IndexManager, *, path: str | None = None) -> dict:
+    raise ToolError(
+        "annex-lib-check is implemented by ticket annex-library-crx.2",
+        code="not_implemented",
+    )
+
+
+def annex_lib_save(manager: IndexManager, **_: Any) -> dict:
+    raise ToolError(
+        "annex-lib-save is implemented by ticket annex-library-crx.3",
+        code="not_implemented",
+    )
+
+
+def annex_lib_edit(manager: IndexManager, **_: Any) -> dict:
+    raise ToolError(
+        "annex-lib-edit is implemented by ticket annex-library-crx.4",
+        code="not_implemented",
+    )

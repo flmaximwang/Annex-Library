@@ -5,3 +5,12 @@
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/

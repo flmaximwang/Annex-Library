@@ -44,7 +44,7 @@ The server uses stdio. Pass `--index /path/to/index.sqlite3` to use a separate c
 
 Save and edit return the record locator and local commit SHA on a committed change. Retry `committed_index_pending` with the same request ID and payload to recover search visibility.
 
-For example, call `annex-lib-search` with `{"title": "conductive protein heme", "include_local_status": true}` to find matching works and include indexed attachment availability.
+For example, call `annex-lib-search` with `{"title": "conductive protein heme", "include_local_status": true}` to find matching works and include current attachment availability.
 
 ## Tests
 

@@ -8,9 +8,11 @@ related versions).
 
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import PurePosixPath
 
+from .catalog import annex_present_paths, probe_local_present
 from .index import Index, Query, lookup_by_path, refresh_local_state, search
 from .normalize import parse_iso_date
 from .refresh import IndexManager
@@ -106,6 +108,18 @@ def annex_lib_search(
         built_at = index.meta("built_at")
     elapsed_ms = (time.perf_counter() - started) * 1000
 
+    if include_local_status and include_attachments:
+        attachments = [attachment for work in works for version in work.versions
+                       for attachment in version.get("attachments", [])]
+        root = index.library_root
+        try:
+            present = annex_present_paths(root, sorted({a["path"] for a in attachments if a["annex_tracked"]}))
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            raise ToolError("Unable to query git-annex availability", code="annex_status_failed") from exc
+        for attachment in attachments:
+            path = attachment["path"]
+            available = path in present if attachment["annex_tracked"] else probe_local_present(root / path)
+            attachment["local_content"] = "present" if available else "missing"
     if not include_attachments:
         for work in works:
             for version in work.versions:
@@ -126,11 +140,8 @@ def annex_lib_search(
         },
         "took_ms": round(elapsed_ms, 2),
     }
-    if include_local_status:
-        payload["index"]["local_status_method"] = (
-            "indexed filesystem snapshot; call annex-lib-attachments with "
-            "refresh_local=true for a fresh filesystem probe of one bundle"
-        )
+    if include_local_status and include_attachments:
+        payload["index"]["local_status_method"] = "git-annex batch for the returned page"
     return payload
 
 

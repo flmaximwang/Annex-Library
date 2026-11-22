@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import os
 import re
 import stat
 import subprocess
@@ -284,6 +285,18 @@ def annex_state(root: Path) -> tuple[set[str], set[str]]:
         .splitlines()
     )
     return present, absent
+
+
+def annex_present_paths(root: Path, paths: Sequence[str]) -> set[str]:
+    """Query availability for the requested annex paths in a single process."""
+    if not paths:
+        return set()
+    payload = b"\0".join(os.fsencode(path) for path in paths) + b"\0"
+    result = subprocess.run(
+        ["git", "annex", "find", "--batch", "-z", "--in=here", "--format=present\\n"],
+        cwd=root, input=payload, capture_output=True, check=True,
+    )
+    return {path for path, line in zip(paths, result.stdout.splitlines(), strict=True) if line == b"present"}
 
 
 def annex_tracked_paths(root: Path, paths: Sequence[str]) -> set[str]:

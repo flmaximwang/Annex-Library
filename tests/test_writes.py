@@ -2,9 +2,11 @@ import subprocess
 
 import pytest
 
+from annex_library.catalog import split_frontmatter
 from annex_library.index import Index
 from annex_library.refresh import IndexManager
-from annex_library.tools import ToolError, annex_lib_save, annex_lib_search
+from annex_library.tools import ToolError, annex_lib_edit, annex_lib_save, annex_lib_search
+from tests.test_search import ARXIV_DOI, ARXIV_GLANCE, WILEY_DOI, WILEY_GLANCE
 from tests.fixtures import clone_fixture
 
 
@@ -103,3 +105,41 @@ def test_save_rollback_and_committed_replay(writer, monkeypatch, tmp_path):
         assert failure.value.code == 'conflict'
     finally:
         restarted.stop()
+
+
+def test_edit_one_version_and_preserve_body(writer):
+    root = writer.index.library_root
+    preprint = root / ARXIV_GLANCE
+    preprint.write_bytes(preprint.read_bytes().replace(b'\n', b'\r\n'))
+    git(root, 'add', ARXIV_GLANCE)
+    git(root, 'commit', '-m', 'Use CRLF in the preprint')
+    writer.refresh_now()
+    notes = preprint.with_name('arxiv-notes.md')
+    wiley = root / WILEY_GLANCE
+    original_notes, original_wiley = notes.read_bytes(), wiley.read_bytes()
+    _, original_body, _ = split_frontmatter(preprint.read_bytes().decode())
+    for doi, path in ((ARXIV_DOI, ARXIV_GLANCE), (WILEY_DOI, WILEY_GLANCE)):
+        work = annex_lib_search(writer, doi=doi)['works'][0]
+        assert work['matched_version'] == path
+        assert {version['record_path'] for version in work['versions']} == {ARXIV_GLANCE, WILEY_GLANCE}
+    work = annex_lib_search(writer, doi=ARXIV_DOI)['works'][0]
+    version = next(version for version in work['versions'] if version['record_path'] == ARXIV_GLANCE)
+    args = dict(path=ARXIV_GLANCE, revision=version['revision'], field_updates={'tags': [*version['tags'], 'verified']})
+    result = annex_lib_edit(writer, **args, request_id='edit-1')
+    assert result['status'] == 'committed'
+    assert git(root, 'show', '--format=', '--name-only', result['commit_sha']) == ARXIV_GLANCE
+    assert split_frontmatter(preprint.read_bytes().decode())[1] == original_body
+    assert notes.read_bytes() == original_notes
+    assert wiley.read_bytes() == original_wiley
+    work = annex_lib_search(writer, tags=['verified'])['works'][0]
+    assert work['matched_version'] == ARXIV_GLANCE
+    current = next(version for version in work['versions'] if version['record_path'] == ARXIV_GLANCE)
+    assert annex_lib_edit(writer, **{**args, 'revision': current['revision']}, request_id='edit-noop')['status'] == 'unchanged'
+    assert annex_lib_edit(writer, **args, request_id='edit-1')['commit_sha'] == result['commit_sha']
+    with pytest.raises(ToolError) as failure:
+        annex_lib_edit(writer, **args, request_id='edit-stale')
+    assert failure.value.code == 'conflict'
+    preprint.rename(preprint.with_name('renamed-glance.md'))
+    with pytest.raises(ToolError) as failure:
+        annex_lib_edit(writer, **{**args, 'revision': current['revision']}, request_id='edit-moved')
+    assert failure.value.code == 'conflict'

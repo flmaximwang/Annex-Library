@@ -19,7 +19,7 @@ from pathlib import Path
 
 import yaml
 
-from .catalog import catalog_snapshot, is_glance_name, split_frontmatter
+from .catalog import Scanner, catalog_scope, catalog_snapshot, is_glance_name, split_frontmatter
 from .normalize import normalize_doi
 from .refresh import IndexManager
 from .validation import DOI, validate_metadata
@@ -333,3 +333,54 @@ def _prepare_save(root: Path, collection: str, fields: dict, body: str, staged: 
         else:
             plan.attachments[path] = source
     return plan
+
+
+def edit_record(
+    manager: IndexManager, path: str, revision: str, field_updates: dict, request_id: str | None
+) -> dict:
+    parts = path.split("/")
+    if any(part in {"", ".", ".."} for part in parts) or "\x00" in path or not catalog_scope(path):
+        raise WriteError("invalid_argument", "Expected a Library-relative catalog record path")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise WriteError("invalid_argument", "Expected the content revision returned by search")
+    immutable = {"doi", "DOI", "id", "pmid", "arxiv_id", "video_id"}
+    if immutable & field_updates.keys():
+        raise WriteError("invalid_argument", "Catalog identifiers are fixed by the archive path")
+    return execute_write(
+        manager, "edit", request_id,
+        {"path": path, "revision": revision, "field_updates": field_updates},
+        lambda root: _prepare_edit(root, path, revision, field_updates),
+    )
+
+
+def _prepare_edit(root: Path, path: str, revision: str, field_updates: dict) -> WritePlan:
+    source = _ensure_safe(root, path)
+    if source.is_symlink() or not source.is_file():
+        raise WriteError("conflict", "The selected record moved or was removed", path=path)
+    data = source.read_bytes()
+    current_revision = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
+    if revision != current_revision:
+        raise WriteError("conflict", "The record changed since search", path=path, revision=current_revision)
+
+    files, _ = catalog_snapshot(root)
+    prefix = catalog_scope(path) + "/"
+    scoped = {name: blob for name, blob in files.items() if name == path or name.startswith(prefix)}
+    entry = next((item for item in Scanner(root).scan(scoped).entries if item.record_path == path), None)
+    if entry is None:
+        raise WriteError("invalid_argument", "The selected path is outside the editable catalog", path=path)
+    _clean_path(root, path)
+    try:
+        fields, body, error = split_frontmatter(data.decode())
+    except UnicodeError as exc:
+        raise WriteError("validation_failed", "Record must contain UTF-8 Markdown", path=path) from exc
+    if fields is None or error:
+        raise WriteError("validation_failed", error or "Record has no YAML frontmatter", path=path)
+
+    updated = {**fields, **field_updates}
+    existing = validate_metadata(path, entry.collection, fields, writing=True)
+    problems = [problem for problem in validate_metadata(path, entry.collection, updated, writing=True)
+                if problem not in existing or problem["rule"].rsplit(".", 1)[-1] in field_updates]
+    if problems:
+        raise WriteError("validation_failed", "Record metadata failed validation", diagnostics=problems)
+    locator = {"bundle": entry.bundle, "record_path": path}
+    return WritePlan(locator, {path: render_record(updated, body)} if updated != fields else {})

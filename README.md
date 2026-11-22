@@ -1,6 +1,6 @@
 # Annex Library
 
-Annex Library is a Model Context Protocol (MCP) server for managing a local git-annex library. The server searches the catalog, locates attachments, validates archive records, and saves prepared DOI and Misc entries.
+Annex Library is a Model Context Protocol (MCP) server for managing a local git-annex library. The server searches the catalog, locates attachments, validates archive records, saves prepared DOI and Misc entries, and edits catalog metadata.
 
 The server builds a SQLite index from catalog Markdown and tracked files. It stores the index outside the library checkout and can rebuild it from the checkout.
 
@@ -39,6 +39,10 @@ The server uses stdio. Pass `--index /path/to/index.sqlite3` to use a separate c
 | `annex-lib-search` | Search by DOI, title, author, tags, capture dates, collection, or free text. Results group linked versions by work and identify the version that matched. |
 | `annex-lib-attachments` | List tracked attachments by `path` or `entry_id`, including git-annex placeholders. Set `refresh_local` to `true` to check current local availability. |
 | `annex-lib-check` | Report archive structure and metadata issues for a Library-relative `path` or the full checkout. |
+| `annex-lib-save` | Archive `metadata` (including the Markdown `body`) and optional absolute `staged_files` with a stable `request_id`. |
+| `annex-lib-edit` | Apply `field_updates` to the YAML of the record at `path` with the expected `revision` and a stable `request_id`. |
+
+Save and edit return the record locator and local commit SHA on a committed change. Retry `committed_index_pending` with the same request ID and payload to recover search visibility.
 
 For example, call `annex-lib-search` with `{"title": "conductive protein heme", "include_local_status": true}` to find matching works and include indexed attachment availability.
 

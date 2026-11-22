@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import time
 from pathlib import PurePosixPath
-from typing import Any
 
 from .index import Index, Query, lookup_by_path, refresh_local_state, search
 from .normalize import parse_iso_date
 from .refresh import IndexManager
 from .validation import check_catalog
-from .writes import WriteError, save_record
+from .writes import WriteError, edit_record, save_record
 
 TOOL_SEARCH = "annex-lib-search"
 TOOL_SAVE = "annex-lib-save"
@@ -206,8 +205,10 @@ def annex_lib_save(
         raise ToolError(str(exc), code=exc.code, detail=exc.detail) from exc
 
 
-def annex_lib_edit(manager: IndexManager, **_: Any) -> dict:
-    raise ToolError(
-        "annex-lib-edit is implemented by ticket annex-library-crx.4",
-        code="not_implemented",
-    )
+def annex_lib_edit(
+    manager: IndexManager, *, path: str, revision: str, field_updates: dict, request_id: str | None = None
+) -> dict:
+    try:
+        return edit_record(manager, path, revision, field_updates, request_id)
+    except WriteError as exc:
+        raise ToolError(str(exc), code=exc.code, detail=exc.detail) from exc

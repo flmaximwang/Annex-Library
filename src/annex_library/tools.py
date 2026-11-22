@@ -16,6 +16,7 @@ from .index import Index, Query, lookup_by_path, refresh_local_state, search
 from .normalize import parse_iso_date
 from .refresh import IndexManager
 from .validation import check_catalog
+from .writes import WriteError, save_record
 
 TOOL_SEARCH = "annex-lib-search"
 TOOL_SAVE = "annex-lib-save"
@@ -196,11 +197,13 @@ def annex_lib_check(manager: IndexManager, *, path: str | None = None) -> dict:
     }
 
 
-def annex_lib_save(manager: IndexManager, **_: Any) -> dict:
-    raise ToolError(
-        "annex-lib-save is implemented by ticket annex-library-crx.3",
-        code="not_implemented",
-    )
+def annex_lib_save(
+    manager: IndexManager, *, metadata: dict, staged_files: list[str] | None = None, request_id: str | None = None
+) -> dict:
+    try:
+        return save_record(manager, metadata, staged_files, request_id)
+    except WriteError as exc:
+        raise ToolError(str(exc), code=exc.code, detail=exc.detail) from exc
 
 
 def annex_lib_edit(manager: IndexManager, **_: Any) -> dict:

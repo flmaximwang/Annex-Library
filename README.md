@@ -1,6 +1,8 @@
 # Annex Library
 
-Annex Library is a read-only Model Context Protocol (MCP) server for searching a local git-annex library and locating its tracked attachments. It builds a SQLite index from catalog Markdown and tracked files. The index is stored outside the library checkout and can be rebuilt from it.
+Annex Library is a Model Context Protocol (MCP) server for managing a local git-annex library. Its scope includes searching the catalog, locating attachments, saving new entries, and editing existing records. The current version supports search and attachment lookup. Save (`annex-lib-save`) and edit (`annex-lib-edit`) are planned.
+
+The server builds a SQLite index from catalog Markdown and tracked files. It stores the index outside the library checkout and can rebuild it from the checkout.
 
 ## Installation
 

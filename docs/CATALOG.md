@@ -48,9 +48,7 @@ source's metadata still finds the work.
 
 ### 2. Notes are excluded even when they are the only markdown in a bundle
 
-`DOI/DOI-10.1126_science.aah6219` contains only `pdf-notes.md`. It is not a
-catalog record; it produces an `info` diagnostic and no entry, so a search for
-notes-only bundles cannot return an entry with no metadata.
+`DOI/DOI-10.1126_science.aah6219` contains only `pdf-notes.md`. It produces no catalog entry or check diagnostic. Adding or removing paper notes leaves catalog and check results unchanged.
 
 ### 3. A bundle without a glance is still searchable
 
@@ -60,7 +58,7 @@ distinct bundles: 76 glances cover 75 bundles (one bundle has two glances) and
 `kind="paper-archive"` with metadata derived from the archived filename plus a
 `no glance: metadata derived from archived filename` warning. The remaining
 bundle (`DOI/DOI-10.1126_science.aah6219`) holds only a notes file and is
-skipped with an `info` diagnostic. The same derivation applies to 515
+outside the catalog. The same derivation applies to 515
 `SelfHosted` bundles and 196 ISBN books.
 
 ### 4. `work_id` groups versions; a record without it is its own work
@@ -148,12 +146,20 @@ index path inside the checkout). Deleting it and rebuilding must produce
 equivalent search results — `test_delete_and_rebuild_is_equivalent` compares seven
 query shapes before and after a rebuild.
 
+## Validation and write requirements
+
+`annex-lib-check` accepts a Library-relative path or checks the full checkout. Each diagnostic identifies the path, rule, severity and a suggested repair. Canonical ISBN names contain a 10- or 13-character identifier, optionally hyphenated. Suffixed names are invalid and bundles sharing an ISBN are reported as collisions. Existing paths are preserved.
+
+New catalog Markdown requires `title`, `source`, and `url` as nonempty strings, `captured` as `YYYY-MM-DD`, `published` as an ISO date, zoned ISO timestamp or `unknown`, `stage: library`, and `tags` as a list of strings. DOI records also require an identifier matching the bundle, an explicit list of authors, and `version_type`. `journal` and `work_id` are optional strings. Video summaries include `video_id`, matching the platform directory. Misc records include the server-allocated UTC timestamp `id`; `legacy_path` is optional. ISBN and SelfHosted records derive metadata from tracked files and require no YAML. The current save scope is DOI glances and Misc notes.
+
+Existing records can derive titles from headings, authors from paper citations, and identifiers from bundle paths. Missing authors, title, version type and video ID remain readable. Check reports malformed legacy fields without rewriting files. Paper notes and ISBN chapter Markdown remain outside catalog validation.
+
 ## Known production anomalies the scanner reports
 
 | Path | Treat |
 | --- | --- |
 | `DOI/DOI-10.1110_ps.062599907` | two glances → two versions + warning |
-| `DOI/DOI-10.1126_science.aah6219` | notes only → info diagnostic, no entry |
+| `DOI/DOI-10.1126_science.aah6219` | notes only → excluded from search and check |
 | `Misc/2026-11-21_orca-vs-herdr-设计哲学.md` | duplicate `id` with a timestamp bundle → both searchable, both warned |
 | `ISBN/ISBN-978-1-119-87842-1 ` (trailing space) | name is kept verbatim |
 | `ISBN-96017519`, `ISBN-0792365909`, `ISBN-7040418304`, `ISBN-978-7-202-12132` | non-13-digit / truncated ISBN forms are kept verbatim, never rewritten |

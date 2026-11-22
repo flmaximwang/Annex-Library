@@ -1,46 +1,18 @@
-"""Index lifecycle and freshness for the Annex Library service.
-
-Freshness model
----------------
-The checkout is the source of truth. The index is refreshed when the checkout
-*moved*: the fingerprint is ``(HEAD, git status --porcelain)``, which covers
-commits, pulls, manual edits, deletions and renames including untracked files.
-
-A background watchdog polls the fingerprint every ``poll_interval`` seconds
-(default 2 s, so a change is visible well inside the five second budget) and
-rebuilds the index in a worker thread. Searches always read the current index,
-so a rebuild never blocks a query; ``index_generation`` in the response tells
-the caller whether it is reading a rebuilt index.
-"""
+"""Refresh the catalog when working files or the Git index change."""
 
 from __future__ import annotations
 
-import hashlib
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
-from .catalog import run_git
+from .catalog import catalog_scope, catalog_snapshot, head_revision
 from .index import Index, IndexStats
-
-
-def checkout_fingerprint(root: Path) -> str:
-    """Cheap fingerprint of every catalog-relevant change in the checkout."""
-    parts: list[bytes] = []
-    try:
-        parts.append(run_git(root, "rev-parse", "HEAD", check=False))
-    except RuntimeError:
-        parts.append(b"")
-    parts.append(run_git(root, "status", "--porcelain", "-z", "-uall", check=False))
-    digest = hashlib.sha256(b"\0".join(parts)).hexdigest()
-    return digest
 
 
 @dataclass
 class RefreshState:
     generation: int = 0
-    fingerprint: str = ""
     built_at: float = 0.0
     checked_at: float = 0.0
     rebuilding: bool = False
@@ -53,88 +25,82 @@ class RefreshState:
 class IndexManager:
     index: Index
     poll_interval: float = 2.0
-    # Search never pays for more than one fingerprint per window. The window is
-    # far below the five second freshness budget, so a change made between two
-    # queries is still visible well within it.
     check_interval: float = 0.5
     watch: bool = True
     state: RefreshState = field(default_factory=RefreshState)
     _thread: threading.Thread | None = None
     _stop: threading.Event = field(default_factory=threading.Event)
     _lock: threading.RLock = field(default_factory=threading.RLock)
-
-    # -- lifecycle --------------------------------------------------------
+    _signatures: dict[str, tuple] = field(default_factory=dict)
 
     def start(self) -> None:
-        """Build if needed, then start the watchdog."""
         self.refresh_now(force=True)
         if self.watch and self._thread is None:
-            thread = threading.Thread(target=self._watch_loop, name="annex-library-refresh", daemon=True)
-            self._thread = thread
-            thread.start()
+            self._thread = threading.Thread(target=self._watch_loop, name="annex-library-refresh", daemon=True)
+            self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout=5)
+        if self._thread is not None:
+            self._thread.join()
         self.index.close()
 
     def _watch_loop(self) -> None:
         while not self._stop.wait(self.poll_interval):
             try:
-                if checkout_fingerprint(self.index.library_root) != self.state.fingerprint:
-                    self.refresh_now(force=False)
-            except Exception as exc:  # never let the watchdog die
-                self.state.last_error = f"{type(exc).__name__}: {exc}"
-
-    # -- rebuilding -------------------------------------------------------
-
-    def refresh_now(self, *, force: bool = False) -> bool:
-        """Rebuild when the checkout fingerprint changed (or when forced)."""
-        with self._lock:
-            if self.state.rebuilding and not force:
-                return False
-            fingerprint = checkout_fingerprint(self.index.library_root)
-            if not force and fingerprint == self.state.fingerprint:
-                return False
-            self.state.rebuilding = True
-            try:
-                stats = self.index.build()
+                self.refresh_now()
             except Exception as exc:
                 self.state.last_error = f"{type(exc).__name__}: {exc}"
-                self.state.rebuilding = False
+
+    def refresh_now(self, *, force: bool = False) -> bool:
+        """Refresh changed bundles, or rebuild the entire index when forced."""
+        with self._lock:
+            try:
+                root = self.index.library_root
+                revision = head_revision(root)
+                files, signatures = catalog_snapshot(root)
+                scopes = {
+                    scope for path in self._signatures.keys() | signatures.keys()
+                    if self._signatures.get(path) != signatures.get(path)
+                    if (scope := catalog_scope(path)) is not None
+                }
+                existing = self.state.stats
+                self.state.checked_at = time.monotonic()
+                if not force and existing and not scopes and revision == existing.revision and self.index.exists():
+                    return False
+                self.state.rebuilding = True
+                if force or not existing or not self.index.exists():
+                    stats = self.index.build(files=files)
+                else:
+                    stats = self.index.refresh(files, scopes, revision)
+                self._signatures = signatures
+                self.state.built_at = time.time()
+                self.state.generation += 1
+                self.state.build_count += 1
+                self.state.stats = stats
+                self.state.last_error = None
+                return True
+            except Exception as exc:
+                self.state.last_error = f"{type(exc).__name__}: {exc}"
                 raise
-            self.state.fingerprint = fingerprint
-            self.state.checked_at = time.monotonic()
-            self.state.built_at = time.time()
-            self.state.generation += 1
-            self.state.build_count += 1
-            self.state.stats = stats
-            self.state.last_error = None
-            self.state.rebuilding = False
-            return True
+            finally:
+                self.state.rebuilding = False
 
     def ensure_fresh(self) -> bool:
-        """Rebuild before answering a query when the checkout moved.
-
-        The fingerprint costs one ``git status`` on the checkout (~100 ms in the
-        production Library), which would dominate a 2 ms query, so it is
-        recomputed at most once per ``check_interval`` window.
-        """
-        if not self.state.fingerprint:
+        if self.state.stats is None or not self.index.exists():
             return self.refresh_now(force=True)
-        now = time.monotonic()
-        if now - self.state.checked_at < self.check_interval:
+        # Serve the published snapshot while the watchdog scans for changes.
+        if self.watch and self._thread is not None:
             return False
-        self.state.checked_at = now
-        if self.is_stale():
-            return self.refresh_now(force=False)
+        if time.monotonic() - self.state.checked_at >= self.check_interval:
+            return self.refresh_now()
         return False
 
     def is_stale(self) -> bool:
         try:
-            return checkout_fingerprint(self.index.library_root) != self.state.fingerprint
+            _, signatures = catalog_snapshot(self.index.library_root)
+            stats = self.state.stats
+            return stats is None or signatures != self._signatures or stats.revision != head_revision(self.index.library_root)
         except Exception:
             return True
 
@@ -145,15 +111,12 @@ class IndexManager:
             "index_path": str(self.index.path),
             "library_root": str(self.index.library_root),
             "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.state.built_at))
-            if self.state.built_at
-            else None,
+            if self.state.built_at else None,
             "entries": stats.entries if stats else None,
             "attachments": stats.attachments if stats else None,
             "diagnostics": stats.diagnostics if stats else None,
             "build_ms": round(stats.duration_ms, 1) if stats else None,
             "rebuilds": self.state.build_count,
-            "stale": self.state.checked_at and (
-                time.monotonic() - self.state.checked_at >= self.check_interval
-            ) and self.is_stale(),
+            "stale": self.is_stale(),
             "last_error": self.state.last_error,
         }

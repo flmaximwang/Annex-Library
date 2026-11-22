@@ -1,6 +1,6 @@
 # Annex Library
 
-Annex Library is a Model Context Protocol (MCP) server for managing a local git-annex library. Its scope includes searching the catalog, locating attachments, saving new entries, and editing existing records. The current version supports search and attachment lookup. Save (`annex-lib-save`) and edit (`annex-lib-edit`) are planned.
+Annex Library is a Model Context Protocol (MCP) server for managing a local git-annex library. Its scope includes searching the catalog, locating attachments, saving new entries, and editing existing records. The current version supports search, attachment lookup, and archive checks. Save (`annex-lib-save`) and edit (`annex-lib-edit`) are planned.
 
 The server builds a SQLite index from catalog Markdown and tracked files. It stores the index outside the library checkout and can rebuild it from the checkout.
 
@@ -38,6 +38,7 @@ The server uses stdio. Pass `--index /path/to/index.sqlite3` to use a separate c
 | --- | --- |
 | `annex-lib-search` | Search by DOI, title, author, tags, capture dates, collection, or free text. Results group linked versions by work and identify the version that matched. |
 | `annex-lib-attachments` | List tracked attachments by `path` or `entry_id`, including git-annex placeholders. Set `refresh_local` to `true` to check current local availability. |
+| `annex-lib-check` | Report archive structure and metadata issues for a Library-relative `path` or the full checkout. |
 
 For example, call `annex-lib-search` with `{"title": "conductive protein heme", "include_local_status": true}` to find matching works and include indexed attachment availability.
 

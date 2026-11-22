@@ -34,6 +34,7 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import re
+import stat
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -219,6 +220,53 @@ def tracked_blobs(root: Path) -> dict[str, str]:
     return result
 
 
+def catalog_scope(path: str) -> str | None:
+    parts = path.split("/")
+    collection = parts[0]
+    if collection == "DOI" and path.endswith(NOTE_SUFFIX):
+        return None
+    if collection in VIDEO_COLLECTIONS and len(parts) >= 4:
+        return "/".join(parts[:3])
+    if collection in {"DOI", "ISBN", "Misc", "SelfHosted"} and len(parts) >= 2:
+        return "/".join(parts[:2])
+    return None
+
+
+def catalog_snapshot(root: Path) -> tuple[dict[str, str], dict[str, tuple]]:
+    """Identify index and worktree changes without reading attachment contents."""
+    files = tracked_blobs(root)
+    untracked = run_git(root, "ls-files", "--others", "--exclude-standard", "-z")
+    for raw in untracked.split(b"\0"):
+        path = raw.decode("utf-8", "surrogateescape")
+        parts = path.split("/")
+        if not catalog_scope(path):
+            continue
+        if (parts[0] == "Misc" and len(parts) in (2, 3) and path.endswith(".md")) or (
+            len(parts) == 4 and (
+                (parts[0] == "DOI" and is_glance_name(parts[-1]))
+                or (parts[0] in VIDEO_COLLECTIONS and parts[-1] == "summary.md")
+            )
+        ):
+            files.setdefault(path, "")
+
+    live = {}
+    signatures = {}
+    for path, oid in files.items():
+        if not catalog_scope(path):
+            continue
+        full_path = root / path
+        try:
+            info = full_path.lstat()
+        except FileNotFoundError:
+            continue
+        live[path] = oid
+        target_present = full_path.exists() if stat.S_ISLNK(info.st_mode) else True
+        signatures[path] = (
+            oid, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, target_present
+        )
+    return live, signatures
+
+
 def annex_state(root: Path) -> tuple[set[str], set[str]]:
     """Return ``(present, absent)`` annex-tracked paths via git-annex itself.
 
@@ -312,7 +360,7 @@ def split_frontmatter(text: str) -> tuple[dict | None, str, str | None]:
         return None, text, "unterminated frontmatter block"
     try:
         loaded = yaml.safe_load(match.group(1))
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, ValueError, RecursionError) as exc:
         return None, text[match.end():], f"unparseable YAML: {_one_line(exc)}"
     if loaded is None:
         return {}, text[match.end():], None
@@ -519,8 +567,9 @@ class Scanner:
 
     # -- public -----------------------------------------------------------
 
-    def scan(self) -> ScanResult:
-        tracked_map = tracked_blobs(self.root)
+    def scan(self, tracked_map: dict[str, str] | None = None) -> ScanResult:
+        if tracked_map is None:
+            tracked_map, _ = catalog_snapshot(self.root)
         tracked = sorted(tracked_map)
         if self._annex_tracked is None:
             self._annex_tracked = annex_tracked_paths(self.root, tracked)
@@ -553,7 +602,6 @@ class Scanner:
             files = bundles[bundle]
             bundle_rel = f"DOI/{bundle}"
             glances = [p for p in files if p.count("/") == 3 and is_glance_name(p.rsplit("/", 1)[-1])]
-            notes = [p for p in files if p.endswith(NOTE_SUFFIX)]
             attachments = self._attachments(files, skip_markdown=True)
             if glances:
                 for glance in sorted(glances):
@@ -579,14 +627,6 @@ class Scanner:
             )
             if derived is not None:
                 entries.append(derived)
-            elif notes:
-                diagnostics.append(
-                    {
-                        "path": bundle_rel,
-                        "severity": "info",
-                        "message": f"{len(notes)} note file(s) and no glance or attachment; skipped",
-                    }
-                )
         return entries
 
     def _doi_entry(
@@ -719,7 +759,7 @@ class Scanner:
                     )
                 diagnostics.append(
                     {
-                        "path": misc_id,
+                        "path": group[0].record_path,
                         "severity": "warning",
                         "message": f"ambiguous Misc id shared by {len(group)} records: "
                                    + ", ".join(filter(None, (g.record_path for g in group))),
@@ -841,7 +881,7 @@ class Scanner:
                 if len(parts) >= 4 and parts[0] == collection:
                     bundle_map.setdefault("/".join(parts[:3]), []).append(path)
             for bundle, files in sorted(bundle_map.items()):
-                summaries = [p for p in files if p.endswith("/summary.md")]
+                summaries = [p for p in files if p == f"{bundle}/summary.md"]
                 if not summaries:
                     diagnostics.append(
                         {
@@ -1033,10 +1073,15 @@ class Scanner:
         return title_from_filename(document) if document else bundle
 
     def _read(self, rel_path: str) -> tuple[str, str | None]:
+        path = self.root / rel_path
         try:
-            return (self.root / rel_path).read_text(encoding="utf-8", errors="replace"), None
-        except OSError as exc:
-            return "", f"cannot read record: {exc.strerror}"
+            if not path.resolve().is_relative_to(self.root.resolve()) or not stat.S_ISREG(path.lstat().st_mode):
+                return "", "cannot read record: expected a regular file within the Library"
+            return path.read_text(encoding="utf-8"), None
+        except UnicodeError:
+            return "", "cannot read record: invalid UTF-8"
+        except (OSError, RuntimeError) as exc:
+            return "", f"cannot read record: {exc}"
 
     def _record_revision(self, rel_path: str, tracked_map: dict[str, str]) -> str:
         """Content revision of a record: the worktree blob SHA.
@@ -1048,8 +1093,11 @@ class Scanner:
         if cached is not None:
             return cached
         try:
-            revision = blob_sha_of_file(self.root / rel_path)
-        except OSError:
+            path = self.root / rel_path
+            if not path.resolve().is_relative_to(self.root.resolve()) or not stat.S_ISREG(path.lstat().st_mode):
+                return tracked_map.get(rel_path, "")
+            revision = blob_sha_of_file(path)
+        except (OSError, RuntimeError):
             revision = tracked_map.get(rel_path, "")
         self._revision_cache[rel_path] = revision
         return revision

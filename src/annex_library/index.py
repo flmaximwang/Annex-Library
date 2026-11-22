@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from .catalog import Attachment, ScanResult, Scanner, annex_state, head_revision
+from .catalog import Attachment, ScanResult, Scanner, catalog_scope, head_revision
 from .normalize import normalize_doi, normalize_tag, normalize_text
 
 SCHEMA_VERSION = 1
@@ -152,16 +152,21 @@ class Index:
                 self._conn = None
 
     @contextmanager
+    def reading(self) -> Iterator[sqlite3.Connection]:
+        with self._conn_lock:
+            yield self.conn
+
+    @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        conn = self.conn
-        try:
+        with self._conn_lock:
+            conn = self.conn
             conn.execute("BEGIN IMMEDIATE")
-            yield conn
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        else:
-            conn.execute("COMMIT")
+            try:
+                yield conn
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
 
     # -- lifecycle --------------------------------------------------------
 
@@ -175,7 +180,7 @@ class Index:
             return None
         return row[0] if row else None
 
-    def build(self, *, with_local_state: bool = True) -> IndexStats:
+    def build(self, *, files: dict[str, str] | None = None) -> IndexStats:
         """Rebuild the index from scratch, atomically.
 
         The old file is kept until the new one is complete: the build writes to
@@ -189,10 +194,7 @@ class Index:
             candidate = Path(str(tmp_path) + suffix)
             if candidate.exists():
                 candidate.unlink()
-        self.close()
-
-        scan = Scanner(self.library_root).scan()
-        present, absent = annex_state(self.library_root) if with_local_state else (set(), set())
+        scan = Scanner(self.library_root).scan(files)
 
         conn = sqlite3.connect(str(tmp_path))
         conn.row_factory = sqlite3.Row
@@ -210,14 +212,15 @@ class Index:
                 "entry_count": str(counts[0]),
                 "attachment_count": str(counts[1]),
                 "diagnostic_count": str(counts[2]),
-                "local_state": "annex-find" if with_local_state else "probe",
+                "local_state": "probe",
             }
             conn.executemany("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", meta.items())
             conn.commit()
         finally:
             conn.close()
-        os.replace(tmp_path, self.path)
-        self._conn = None
+        with self._conn_lock:
+            self.close()
+            os.replace(tmp_path, self.path)
         stats = IndexStats(
             entries=counts[0],
             attachments=counts[1],
@@ -226,6 +229,35 @@ class Index:
             revision=revision,
         )
         return stats
+
+    def refresh(self, files: dict[str, str], scopes: set[str], revision: str) -> IndexStats:
+        """Publish only changed bundles, including Misc identifier peers."""
+        started = time.perf_counter()
+        misc_changed = any(scope.startswith("Misc/") for scope in scopes)
+        selected = {
+            path: oid for path, oid in files.items()
+            if catalog_scope(path) in scopes or (misc_changed and path.startswith("Misc/"))
+        }
+        scan = Scanner(self.library_root).scan(selected)
+        with self.transaction() as conn:
+            if misc_changed:
+                conn.execute("DELETE FROM entries WHERE collection = 'Misc'")
+                conn.execute("DELETE FROM diagnostics WHERE path LIKE 'Misc/%'")
+            for scope in sorted(scopes):
+                conn.execute("DELETE FROM entries WHERE bundle = ? OR record_path = ?", (scope, scope))
+                conn.execute("DELETE FROM diagnostics WHERE path = ?", (scope,))
+            _populate(conn, scan)
+            counts = tuple(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                           for table in ("entries", "attachments", "diagnostics"))
+            meta = {
+                "library_revision": revision,
+                "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "entry_count": str(counts[0]),
+                "attachment_count": str(counts[1]),
+                "diagnostic_count": str(counts[2]),
+            }
+            conn.executemany("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", meta.items())
+        return IndexStats(*counts, (time.perf_counter() - started) * 1000, revision)
 
     def ensure(self) -> IndexStats | None:
         """Build the index when missing or built for a different checkout."""
@@ -243,7 +275,8 @@ def _populate(conn: sqlite3.Connection, scan: ScanResult) -> tuple[int, int, int
     tag_rows: list[tuple] = []
     attachment_rows: list[tuple] = []
 
-    for index, entry in enumerate(scan.entries, start=1):
+    first_pk = conn.execute("SELECT coalesce(max(id), 0) + 1 FROM entries").fetchone()[0]
+    for index, entry in enumerate(scan.entries, start=first_pk):
         doi_norm = entry.doi_norm
         entry_rows.append(
             (
@@ -299,7 +332,7 @@ def _populate(conn: sqlite3.Connection, scan: ScanResult) -> tuple[int, int, int
         "INSERT INTO entries VALUES (" + ",".join("?" * 28) + ")",
         entry_rows,
     )
-    conn.executemany("INSERT INTO entry_tags VALUES (?, ?, ?)", tag_rows)
+    conn.executemany("INSERT OR IGNORE INTO entry_tags VALUES (?, ?, ?)", tag_rows)
     conn.executemany("INSERT INTO attachments VALUES (NULL, ?, ?, ?, ?, ?, ?, ?)", attachment_rows)
     conn.executemany(
         "INSERT INTO diagnostics(path, severity, message) VALUES (?, ?, ?)",
@@ -394,7 +427,7 @@ def search(index: Index, query: Query) -> tuple[list[WorkResult], dict]:
     base_sql = f"""
         SELECT * FROM entries idx
         WHERE {where}
-        ORDER BY (idx.kind = 'glance') DESC, idx.captured_date DESC, idx.title COLLATE NOCASE
+        ORDER BY (idx.kind = 'glance') DESC, idx.captured_date DESC, idx.title COLLATE NOCASE, idx.entry_id
     """
     rows = index.conn.execute(base_sql, params).fetchall()
 
@@ -420,7 +453,7 @@ def search(index: Index, query: Query) -> tuple[list[WorkResult], dict]:
             f"""
             SELECT * FROM entries
             WHERE COALESCE(NULLIF(work_id, ''), entry_id) IN ({placeholders})
-            ORDER BY (kind = 'glance') DESC, captured_date DESC
+            ORDER BY (kind = 'glance') DESC, captured_date DESC, title COLLATE NOCASE, entry_id
             """,
             work_keys,
         ).fetchall()

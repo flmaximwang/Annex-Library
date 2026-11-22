@@ -9,11 +9,13 @@ related versions).
 from __future__ import annotations
 
 import time
+from pathlib import PurePosixPath
 from typing import Any
 
 from .index import Index, Query, lookup_by_path, refresh_local_state, search
 from .normalize import parse_iso_date
 from .refresh import IndexManager
+from .validation import check_catalog
 
 TOOL_SEARCH = "annex-lib-search"
 TOOL_SAVE = "annex-lib-save"
@@ -98,7 +100,10 @@ def annex_lib_search(
         include_local=include_local_status,
     )
     started = time.perf_counter()
-    works, summary = search(index, query)
+    with index.reading():
+        works, summary = search(index, query)
+        revision = index.meta("library_revision")
+        built_at = index.meta("built_at")
     elapsed_ms = (time.perf_counter() - started) * 1000
 
     if not include_attachments:
@@ -115,17 +120,16 @@ def annex_lib_search(
         "works": [work.as_dict() for work in works],
         "index": {
             "generation": manager.state.generation,
-            "library_revision": index.meta("library_revision"),
-            "built_at": index.meta("built_at"),
+            "library_revision": revision,
+            "built_at": built_at,
             "local_status": "requested" if include_local_status else "not requested",
         },
         "took_ms": round(elapsed_ms, 2),
     }
     if include_local_status:
         payload["index"]["local_status_method"] = (
-            "indexed snapshot of `git annex find --in=here` captured when the index "
-            "was built; call annex-lib-attachments with refresh_local=true for a "
-            "fresh filesystem probe of one bundle"
+            "indexed filesystem snapshot; call annex-lib-attachments with "
+            "refresh_local=true for a fresh filesystem probe of one bundle"
         )
     return payload
 
@@ -141,12 +145,13 @@ def annex_lib_locate_attachments(
     if not path and not entry_id:
         raise ToolError("path or entry_id is required", code="invalid_argument")
     manager.ensure_fresh()
-    record = lookup_by_path(manager.index, (path or entry_id or "").rstrip("/"))
-    if record is None:
-        raise ToolError(f"no catalog record for {path or entry_id!r}", code="not_found")
-    if refresh_local:
-        refresh_local_state(manager.index, [a["path"] for a in record.get("attachments", [])])
-        record = lookup_by_path(manager.index, (path or entry_id or "").rstrip("/")) or record
+    with manager.index.reading():
+        record = lookup_by_path(manager.index, (path or entry_id or "").rstrip("/"))
+        if record is None:
+            raise ToolError(f"no catalog record for {path or entry_id!r}", code="not_found")
+        if refresh_local:
+            refresh_local_state(manager.index, [a["path"] for a in record.get("attachments", [])])
+            record = lookup_by_path(manager.index, (path or entry_id or "").rstrip("/")) or record
     attachments = record.get("attachments", [])
     present = sum(1 for a in attachments if a.get("local_content") == "present")
     missing = [
@@ -174,10 +179,21 @@ def annex_lib_locate_attachments(
 
 
 def annex_lib_check(manager: IndexManager, *, path: str | None = None) -> dict:
-    raise ToolError(
-        "annex-lib-check is implemented by ticket annex-library-crx.2",
-        code="not_implemented",
-    )
+    selected = PurePosixPath(path or ".")
+    if selected.is_absolute() or ".." in selected.parts or "\x00" in str(selected):
+        raise ToolError("path must be relative to the Library checkout", code="invalid_argument")
+    root = manager.index.library_root
+    files, diagnostics = check_catalog(root)
+    prefix = selected.as_posix()
+    if prefix != ".":
+        if not (root / selected).exists() and not any(p == prefix or p.startswith(prefix + "/") for p in files):
+            raise ToolError(f"No such archive path: {prefix}", code="not_found")
+        diagnostics = [d for d in diagnostics if d["path"] == prefix or d["path"].startswith(prefix + "/")]
+    return {
+        "path": prefix,
+        "ok": not any(d["severity"] == "error" for d in diagnostics),
+        "diagnostics": diagnostics,
+    }
 
 
 def annex_lib_save(manager: IndexManager, **_: Any) -> dict:

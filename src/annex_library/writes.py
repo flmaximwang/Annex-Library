@@ -19,10 +19,24 @@ from pathlib import Path
 
 import yaml
 
-from .catalog import Scanner, catalog_scope, catalog_snapshot, is_glance_name, split_frontmatter
-from .normalize import normalize_doi
+from .catalog import (
+    COLLECTIONS,
+    VIDEO_COLLECTIONS,
+    Scanner,
+    catalog_scope,
+    catalog_snapshot,
+    is_glance_name,
+    split_frontmatter,
+)
+from .normalize import normalize_doi, parse_iso_date
 from .refresh import IndexManager
-from .validation import DOI, validate_metadata
+from .validation import (
+    DOI,
+    ISBN_NAME,
+    canonical_isbn,
+    isbn_digits,
+    validate_metadata,
+)
 
 
 class WriteError(Exception):
@@ -37,6 +51,7 @@ class WritePlan:
     locator: dict
     records: dict[str, bytes] = field(default_factory=dict)
     attachments: dict[str, Path] = field(default_factory=dict)
+    texts: dict[str, Path] = field(default_factory=dict)
 
 
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -95,6 +110,11 @@ def _publish(manager: IndexManager, result: dict, *, replayed: bool) -> dict:
     return {"status": "committed", "replayed": replayed, **result}
 
 
+def _save_attachments_md(name: str) -> bool:
+    """Markdown attachments are Git text objects, not annex content."""
+    return name.casefold().endswith(".md")
+
+
 def execute_write(
     manager: IndexManager,
     operation: str,
@@ -124,7 +144,7 @@ def execute_write(
         if _git(root, "ls-files", "--unmerged").stdout:
             raise WriteError("conflict", "Resolve the unmerged Git index before writing the archive")
         plan = prepare(root)
-        if not plan.records and not plan.attachments:
+        if not plan.records and not plan.attachments and not plan.texts:
             manager.refresh_now()
             return {"status": "unchanged", "commit_sha": None, **plan.locator}
         sha = _commit(root, plan, operation, request_key, payload_digest)
@@ -132,7 +152,7 @@ def execute_write(
 
 
 def _commit(root: Path, plan: WritePlan, operation: str, request_key: str, payload: str) -> str:
-    paths = sorted(plan.records.keys() | plan.attachments.keys())
+    paths = sorted(plan.records.keys() | plan.attachments.keys() | plan.texts.keys())
     backups: dict[str, bytes | None] = {}
     made_dirs = set()
     for path in paths:
@@ -162,10 +182,14 @@ def _commit(root: Path, plan: WritePlan, operation: str, request_key: str, paylo
             touched.append(relative)
             if relative in plan.records:
                 dest.write_bytes(plan.records[relative])
+            elif relative in plan.texts:
+                shutil.copyfile(plan.texts[relative], dest)
             else:
                 shutil.copyfile(plan.attachments[relative], dest)
         if plan.records:
             _git(root, "add", "--", *plan.records)
+        if plan.texts:
+            _git(root, "add", "--", *plan.texts)
         if plan.attachments:
             _git(root, "annex", "add", "--force-large", "--", *plan.attachments)
             for relative in plan.attachments:
@@ -224,15 +248,23 @@ def _existing_attachment_matches(root: Path, path: str, staged: Path) -> bool:
 
 def save_record(manager: IndexManager, metadata: dict, staged_files: list[str] | None, request_id: str | None) -> dict:
     fields = dict(metadata)
-    default_collection = "DOI" if "doi" in fields else "Misc"
-    collection = fields.pop("collection", default_collection)
+    collection = fields.pop("collection", None)
     body = fields.pop("body", None)
-    if collection not in ("DOI", "Misc"):
-        raise WriteError("invalid_argument", "Save supports DOI and Misc records")
+    if collection is None:
+        if "doi" in fields:
+            collection = "DOI"
+        elif "isbn" in fields:
+            collection = "ISBN"
+        elif isinstance(body, str):
+            collection = "Misc"
+        else:
+            raise WriteError("invalid_argument", "metadata.collection is required for this save")
+    if not isinstance(collection, str) or collection not in COLLECTIONS:
+        raise WriteError("invalid_argument", f"Save supports the collections: {', '.join(COLLECTIONS)}")
     if not isinstance(body, str) or not body.strip():
         raise WriteError("invalid_argument", "metadata.body must be a nonempty Markdown string")
     if "id" in fields:
-        raise WriteError("invalid_argument", "The service allocates Misc IDs")
+        raise WriteError("invalid_argument", "The service allocates Misc and SelfHosted IDs")
     body = body if body.endswith("\n") else body + "\n"
     fields.setdefault("stage", "library")
     if collection == "DOI":
@@ -241,6 +273,15 @@ def save_record(manager: IndexManager, metadata: dict, staged_files: list[str] |
         if not DOI.fullmatch(normalized) or "\\" in normalized or "\x00" in normalized:
             raise WriteError("invalid_argument", "metadata.doi must be a valid archive DOI")
         fields["doi"] = normalized
+    elif collection == "ISBN":
+        isbn = canonical_isbn(fields.get("isbn"))
+        if isbn is None:
+            raise WriteError("invalid_argument", "metadata.isbn must be a valid ISBN-10 or ISBN-13")
+        fields["isbn"] = isbn
+    elif collection in VIDEO_COLLECTIONS:
+        video_id = fields.get("video_id")
+        if not isinstance(video_id, str) or not _valid_video_id(video_id):
+            raise WriteError("invalid_argument", "metadata.video_id must be a platform identifier without separators")
 
     with tempfile.TemporaryDirectory(prefix="annex-library-stage-") as temp:
         staged = {}
@@ -248,7 +289,7 @@ def save_record(manager: IndexManager, metadata: dict, staged_files: list[str] |
             source = Path(raw)
             if not source.is_absolute() or not source.is_file():
                 raise WriteError("invalid_argument", f"Expected an absolute path to a readable staged file: {raw}")
-            if source.name.startswith(".") or source.suffix.casefold() == ".md" or any(ord(ch) < 32 for ch in source.name):
+            if source.name.startswith(".") or source.name in {".", ".."} or any(ord(ch) < 32 for ch in source.name):
                 raise WriteError("invalid_argument", f"Invalid staged attachment name: {source.name}")
             if source.name in staged:
                 raise WriteError("conflict", f"Duplicate staged attachment name: {source.name}")
@@ -266,10 +307,57 @@ def save_record(manager: IndexManager, metadata: dict, staged_files: list[str] |
                              lambda root: _prepare_save(root, collection, fields, body, staged))
 
 
+def _valid_video_id(value: str) -> bool:
+    return (
+        bool(value)
+        and value not in {".", ".."}
+        and not any(char in value for char in "/\\\x00")
+        and not any(char.isspace() for char in value)
+    )
+
+
+def _record_plan(root: Path, plan: WritePlan, record: str, fields: dict, body: str) -> None:
+    """Add the record when absent, or reuse an equivalent one."""
+    dest = _ensure_safe(root, record)
+    if not (dest.exists() or dest.is_symlink()):
+        plan.records[record] = render_record(fields, body)
+        return
+    _clean_path(root, record)
+    if not dest.is_file() or dest.is_symlink():
+        raise WriteError("conflict", f"Expected Markdown at {record}")
+    current_fields, current_body, error = split_frontmatter(dest.read_text())
+    if error or current_fields is None or current_body != body:
+        # YAML date scalars may deserialize as date objects in existing records.
+        equivalent = current_fields is not None and all(
+            str(current_fields.get(key)) == str(value) if key in {"published", "captured"} else current_fields.get(key) == value
+            for key, value in fields.items()
+        )
+        if error or not equivalent or current_body != body:
+            raise WriteError("conflict", "A different record already exists at this archive path", record_path=record)
+
+
+def _plan_attachments(
+    root: Path, plan: WritePlan, prefix: str, staged: dict[str, Path], *, record: str
+) -> None:
+    """Plan staged files: markdown as Git text, everything else as annex content."""
+    for name, source in staged.items():
+        path = f"{prefix}/{name}"
+        if path == record:
+            raise WriteError("conflict", "An attachment name collides with the record", path=path)
+        dest = _ensure_safe(root, path)
+        if dest.exists() or dest.is_symlink():
+            _clean_path(root, path)
+            if not _existing_attachment_matches(root, path, source):
+                raise WriteError("conflict", f"Attachment name already exists with different contents: {name}", path=path)
+        elif _save_attachments_md(name):
+            plan.texts[path] = source
+        else:
+            plan.attachments[path] = source
+
+
 def _prepare_save(root: Path, collection: str, fields: dict, body: str, staged: dict[str, Path]) -> WritePlan:
     fields = dict(fields)
-    raw_title = fields.get("title")
-    title = _slug(raw_title if isinstance(raw_title, str) else "", "Untitled")
+    title = _slug(fields.get("title") if isinstance(fields.get("title"), str) else "", "Untitled")
     if collection == "Misc":
         misc_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         fields["id"] = misc_id
@@ -277,6 +365,22 @@ def _prepare_save(root: Path, collection: str, fields: dict, body: str, staged: 
         if (root / bundle).exists():
             raise WriteError("conflict", "Allocated timestamp is already in use. Retry the request.")
         record = f"{bundle}/{title}.md"
+        asset_prefix = f"{bundle}/assets"
+    elif collection == "ISBN":
+        bundle = _isbn_bundle(root, fields["isbn"])
+        record = f"{bundle}/{_slug(str(fields.get('source', '')), 'source').lower()}-glance.md"
+        asset_prefix = bundle
+    elif collection == "SelfHosted":
+        bundle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        fields["id"] = bundle_id
+        bundle = f"SelfHosted/{bundle_id}"
+        if (root / bundle).exists():
+            raise WriteError("conflict", "Allocated timestamp is already in use. Retry the request.")
+        record = f"{bundle}/{_slug(str(fields.get('source', '')), 'source').lower()}-glance.md"
+        asset_prefix = f"{bundle}/assets"
+    elif collection in VIDEO_COLLECTIONS:
+        bundle = _video_bundle(root, collection, fields)
+        record = f"{bundle}/summary.md"
         asset_prefix = f"{bundle}/assets"
     else:
         oid = fields["doi"].replace("/", "_")
@@ -304,35 +408,71 @@ def _prepare_save(root: Path, collection: str, fields: dict, body: str, staged: 
     if problems:
         raise WriteError("validation_failed", "Record metadata failed validation", diagnostics=problems)
     locator = {"bundle": bundle, "record_path": record}
-    if collection == "Misc":
+    if collection in {"Misc", "SelfHosted"}:
         locator["id"] = fields["id"]
     plan = WritePlan(locator)
-    dest = _ensure_safe(root, record)
-    if dest.exists() or dest.is_symlink():
-        _clean_path(root, record)
-        if not dest.is_file() or dest.is_symlink():
-            raise WriteError("conflict", f"Expected Markdown at {record}")
-        current_fields, current_body, error = split_frontmatter(dest.read_text())
-        if error or current_fields is None or any(current_fields.get(k) != v for k, v in fields.items()) or current_body != body:
-            # YAML date scalars may deserialize as date objects in legacy glances.
-            equivalent = current_fields is not None and all(
-                str(current_fields.get(k)) == str(v) if k in {"published", "captured"} else current_fields.get(k) == v
-                for k, v in fields.items()
-            )
-            if error or not equivalent or current_body != body:
-                raise WriteError("conflict", "A different glance already exists for this DOI", **locator)
-    else:
-        plan.records[record] = render_record(fields, body)
-    for name, source in staged.items():
-        path = f"{asset_prefix}/{name}"
-        dest = _ensure_safe(root, path)
-        if dest.exists() or dest.is_symlink():
-            _clean_path(root, path)
-            if not _existing_attachment_matches(root, path, source):
-                raise WriteError("conflict", f"Attachment name already exists with different contents: {name}", path=path)
-        else:
-            plan.attachments[path] = source
+    _record_plan(root, plan, record, fields, body)
+    _plan_attachments(root, plan, asset_prefix, staged, record=record)
     return plan
+
+
+def _isbn_bundle(root: Path, isbn: str) -> str:
+    """Resolve the ISBN bundle, reusing one canonical directory per ISBN."""
+    digits = isbn_digits(isbn)
+    book_root = root / "ISBN"
+    _ensure_safe(root, "ISBN/placeholder")
+    if not book_root.is_dir():
+        return f"ISBN/ISBN-{isbn}"
+    matches = []
+    malformed = []
+    for name in sorted(p.name for p in book_root.iterdir() if p.is_dir()):
+        if not name.startswith("ISBN-"):
+            continue
+        candidate = name[5:]
+        candidate_digits = isbn_digits(candidate)
+        if candidate_digits != digits:
+            continue
+        if ISBN_NAME.fullmatch(name):
+            matches.append(name)
+        else:
+            malformed.append(name)
+    if len(matches) > 1:
+        raise WriteError("conflict", f"Multiple archive directories hold this ISBN: {', '.join(matches)}")
+    if matches:
+        return f"ISBN/{matches[0]}"
+    if malformed:
+        raise WriteError(
+            "conflict",
+            f"An ISBN directory with an unverified suffix already exists: {', '.join(malformed)}",
+        )
+    return f"ISBN/ISBN-{isbn}"
+
+
+def _video_bundle(root: Path, collection: str, fields: dict) -> str:
+    """Resolve ``<Platform>/<video_id>/<author>_<date>_<title>`` deterministically."""
+    video_id = fields["video_id"]
+    authors = fields.get("authors")
+    author = authors[0] if isinstance(authors, list) and authors and isinstance(authors[0], str) else ""
+    author_slug = _slug(author, "Author")
+    published = str(fields.get("published", ""))
+    match = re.search(r"\d{4}-\d{2}-\d{2}", published)
+    if match is None or parse_iso_date(match[0]) is None:
+        raise WriteError("invalid_argument", "metadata.published must carry a YYYY-MM-DD publication date")
+    date = match[0]
+    title_slug = _slug(str(fields.get("title", "")), "Untitled")
+    folder = f"{author_slug}_{date}_{title_slug}"
+    bundle = f"{collection}/{video_id}/{folder}"
+    _ensure_safe(root, f"{collection}/{video_id}/placeholder")
+    parent = root / collection / video_id
+    if parent.is_dir():
+        existing = sorted(p.name for p in parent.iterdir() if p.is_dir())
+        if existing and existing != [folder]:
+            raise WriteError(
+                "conflict",
+                f"Video {video_id} is already archived as {existing[0]}",
+                bundle=f"{collection}/{video_id}/{existing[0]}",
+            )
+    return bundle
 
 
 def edit_record(

@@ -37,9 +37,17 @@ Catalog rules (derived from the checkout's own README and history):
   `*-glance.md` per version. Notes (`*-notes.md`) are outside the catalog.
 * Preprints and journal articles with distinct identifiers get their own
   bundles; a shared `work_id` groups explicitly verified versions.
+* Books: `ISBN/ISBN-<isbn>/<source>-glance.md`. Chapter distillation and other
+  Markdown in the bundle are attachments; a bundle without a glance stays
+  searchable from its archived filenames and reports a warning.
+* Self-hosted documents: `SelfHosted/<YYYYMMDDTHHMMSS.ffffffZ>/<source>-glance.md`;
+  a bundle without a glance falls back to archived filenames with a warning.
 * Videos: `Bilibili|YouTube|Vimeo/<id>/<author>_<date>_<title>/summary.md`.
 * Misc: `Misc/<YYYYMMDDTHHMMSS.ffffffZ>/<topic>.md` with a UTC timestamp id.
-* Books: `ISBN/<bundle>` with a book PDF; chapter distillation is not cataloged.
+
+Saving is available for every listed collection: `metadata.body` is always
+required, `.md` attachments are committed as Git files, and every other
+attachment goes through git-annex.
 
 Search uses YAML metadata. Results are grouped by work, name the version that
 matched, and carry the archive locator, relative record path, content revision
@@ -55,16 +63,18 @@ def build_server(manager: IndexManager) -> MCPServer:
         name="annex-lib-search",
         title="Search the Annex Library",
         description=(
-            "Search catalog records by exact DOI, title keywords, coauthor surname, "
+            "Search catalog records by exact DOI, exact ISBN, title keywords, coauthor surname, "
             "inclusive captured date range, exact tags combined with AND, collection "
-            "or free text. Returns works grouped by work_id with the directly matched "
-            "version, each version's archive locator (relative glance path), content "
-            "revision, and tracked attachments. Set include_local_status=true to add "
+            "or free text. ISBN matching is hyphen- and space-insensitive, and free text also "
+            "matches stored identifier values such as ISBN. Returns works grouped by work_id with "
+            "the directly matched version, each version's archive locator (relative glance path), "
+            "content revision, and tracked attachments. Set include_local_status=true to add "
             "batched git-annex local content availability for the returned page."
         ),
     )
     def search_tool(
         doi: str | None = None,
+        isbn: str | None = None,
         title: str | None = None,
         author: str | None = None,
         tags: list[str] | None = None,
@@ -81,6 +91,7 @@ def build_server(manager: IndexManager) -> MCPServer:
             return annex_lib_search(
                 manager,
                 doi=doi,
+                isbn=isbn,
                 title=title,
                 author=author,
                 tags=tags,
@@ -130,8 +141,28 @@ def build_server(manager: IndexManager) -> MCPServer:
 
     @server.tool(
         name="annex-lib-save",
-        title="Archive a prepared entry",
-        description="Archive prepared metadata and optional server-readable staged attachments.",
+        title="Archive a prepared entry in any catalog collection",
+        description=(
+            "Archive one prepared record in any catalog collection. metadata.collection selects "
+            "DOI, ISBN, Misc, Bilibili, YouTube, Vimeo or SelfHosted: it is required for the video "
+            "collections and SelfHosted, and may be omitted for DOI (inferred from doi), ISBN "
+            "(from isbn) or Misc (from body). Pass SelfHosted explicitly: its metadata carries no "
+            "identifier, so a SelfHosted save without collection is archived as a Misc note. "
+            "metadata.body is always required and must be "
+            "nonempty Markdown; never pass id, because the service allocates Misc and SelfHosted "
+            "timestamp ids. The record layout follows the collection: DOI/DOI-<doi with / as _>/"
+            "<journal>-<author>-<date>-<title>/<source>-glance.md, ISBN/ISBN-<isbn>/<source>-"
+            "glance.md (an existing canonical ISBN-<isbn> directory with the same digits is reused), "
+            "SelfHosted/<UTC timestamp>/<source>-glance.md, Misc/<UTC timestamp>/<title>.md, and "
+            "<Platform>/<video_id>/<author>_<YYYY-MM-DD>_<short title>/summary.md. ISBN also needs "
+            "isbn and authors (url may be empty); videos need video_id without path separators or "
+            "whitespace, authors and a published date containing YYYY-MM-DD; SelfHosted accepts "
+            "optional authors. staged_files are absolute paths: Markdown (.md) is committed as an "
+            "ordinary Git file and everything else goes to git-annex, with an existing path "
+            "reused only when its content is byte-identical. A save with nothing new returns "
+            "unchanged; reuse request_id to make retries replay-safe, because a repeated request "
+            "returns the original commit with replayed: true."
+        ),
     )
     def save_tool(metadata: dict, staged_files: list[str] | None = None, request_id: str | None = None) -> dict:
         try:

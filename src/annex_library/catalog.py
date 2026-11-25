@@ -1008,9 +1008,9 @@ class Scanner:
         """Scan ``<Collection>/<bundle>/`` glance records with legacy fallback.
 
         A bundle whose only records are legacy attachments keeps deriving
-        metadata from archived filenames (warning); markdown there stays out of
-        the attachment list so a distillation document is never mistaken for
-        the book itself.
+        metadata from archived filenames (warning). Markdown beside a glance
+        stays an attachment: a distillation document is evidence about the
+        bundle, never its record.
         """
         bundles: dict[str, list[str]] = {}
         for path in tracked:

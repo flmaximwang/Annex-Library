@@ -15,10 +15,10 @@ reproduces in miniature.
 | Collection | Record | Everything else |
 | --- | --- | --- |
 | `DOI/` | `DOI-<doi>/<JOURNAL>-<Author>-<YYYY-MM-DD>-<Title>/<source>-glance.md` | `*-notes.md` (23), `skill/**` (24), `assets/**`, the PDF itself |
-| `ISBN/` | the bundle itself, with its book PDF | chapter distillation (`ch0N/verified.md`, `PIPELINE_STATE.md`, `BOOK_OVERVIEW.md`, `GLOSSARY.md`, `SKILL.md`, `.cangjie/**`) — 703 markdown files, none of them a record |
+| `ISBN/` | `ISBN/<bundle>/<source>-glance.md` when a glance exists; otherwise its archived document (metadata derived from the filename, with a warning; no production bundle has a glance yet) | chapter distillation (`ch0N/verified.md`, `PIPELINE_STATE.md`, `BOOK_OVERVIEW.md`, `GLOSSARY.md`, `SKILL.md`, `.cangjie/**`) — 703 markdown files, attachments even beside a glance |
 | `Misc/` | `Misc/<YYYYMMDDTHHMMSS.ffffffZ>/<topic>.md` | `assets/**` annex attachments |
 | `Bilibili/` `YouTube/` `Vimeo/` | `<id>/<作者或作者名>_<YYYY-MM-DD>_<短标题>/summary.md` (82 + 16 + 1) | `transcript.md` (25), `.seg/wNNNN-NNNN.md` (9), `00-要点速览.md` (1) |
-| `SelfHosted/` | document bundle, metadata from the archived filename | — (no markdown at all in 515 bundles) |
+| `SelfHosted/` | `SelfHosted/<id>/<source>-glance.md` when a glance exists; otherwise its archived document (metadata derived from the filename, with a warning; all 515 production bundles are in this state) | `assets/**` and every other tracked file, including Markdown added later |
 
 Measured at that revision:
 
@@ -138,6 +138,14 @@ an author line, and they stay searchable by everything else. Coauthor search
 matches any surname component of any author, with diacritics folded
 (`Maéda` matches `Maeda`).
 
+Identifiers are matched punctuation- and case-insensitively too: the `isbn`
+criterion, and free-text terms that carry a digit, compare the stored
+`identifiers_json` with hyphens, spaces and case removed, so `9780306406157`
+and `978 0 306 40615 7` both find `ISBN/ISBN-978-0-306-40615-7`. A book whose
+bundle has no glance carries no `isbn` identifier (it is derived from the
+filename into `extra`), so it is found by `collection=ISBN` or its title
+instead.
+
 ### 10. The index is disposable
 
 The SQLite file lives outside the checkout (default
@@ -148,9 +156,9 @@ query shapes before and after a rebuild.
 
 ## Validation and write requirements
 
-`annex-lib-check` accepts a Library-relative path or checks the full checkout. Each diagnostic identifies the path, rule, severity and a suggested repair. Canonical ISBN names contain a 10- or 13-character identifier, optionally hyphenated. Suffixed names are invalid and bundles sharing an ISBN are reported as collisions. Existing paths are preserved.
+`annex-lib-check` accepts a Library-relative path or checks the full checkout. Each diagnostic identifies the path, rule, severity and a suggested repair. Canonical ISBN names contain a 10- or 13-character identifier, optionally hyphenated. Suffixed names are invalid and bundles sharing an ISBN are reported as collisions. An invalid ISBN directory name or check digit is a warning for a legacy bundle without a glance and an error once the bundle has a `<source>-glance.md` record. Existing paths are preserved.
 
-New catalog Markdown requires `title`, `source`, and `url` as nonempty strings, `captured` as `YYYY-MM-DD`, `published` as an ISO date, zoned ISO timestamp or `unknown`, `stage: library`, and `tags` as a list of strings. DOI records also require an identifier matching the bundle, an explicit list of authors, and `version_type`. `journal` and `work_id` are optional strings. Video summaries include `video_id`, matching the platform directory. Misc records include the server-allocated UTC timestamp `id`; `legacy_path` is optional. ISBN and SelfHosted records derive metadata from tracked files and require no YAML. The current save scope is DOI glances and Misc notes.
+New catalog Markdown is a `<source>-glance.md` in DOI, ISBN and SelfHosted bundles, `summary.md` in a video bundle, or a `<title>.md` inside a Misc timestamp bundle. It requires `title`, `source`, and `url` as nonempty strings (`url` may be empty for ISBN), `captured` as `YYYY-MM-DD`, `published` as an ISO date, zoned ISO timestamp or `unknown` (ISBN also accepts `YYYY` and `YYYY-MM`), `stage: library`, and `tags` as a list of strings. DOI records also require an identifier matching the bundle, an explicit list of authors, and `version_type`; `journal` and `work_id` are optional strings. Video records require `video_id` matching the platform directory, an explicit list of `authors`, and a `published` value containing `YYYY-MM-DD`. Misc records include the server-allocated UTC timestamp `id`; SelfHosted records carry their timestamp bundle as `id`. `legacy_path` is optional. Saving covers all seven collections and always requires a nonempty Markdown `body`; `.md` attachments are committed as Git files while every other attachment goes through git-annex.
 
 Existing records can derive titles from headings, authors from paper citations, and identifiers from bundle paths. Missing authors, title, version type and video ID remain readable. Check reports malformed legacy fields without rewriting files. Paper notes and ISBN chapter Markdown remain outside catalog validation.
 

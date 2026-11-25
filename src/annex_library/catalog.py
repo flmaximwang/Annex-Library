@@ -12,9 +12,11 @@ evidence table.
     attachment-only entry (its metadata is derived from archived filenames).
 
 ``ISBN/<bundle>/``
-    One entry per book bundle ``ISBN-<isbn>``. Chapter distillation markdown
-    (``ch01/verified.md``, ``skills/*/SKILL.md``, ``.cangjie/**``) is not a
-    catalog record. Frontmatter is optional here.
+    One entry per book bundle ``ISBN-<isbn>``. The catalog record is the
+    ``<source>-glance.md`` file at the bundle root; chapter distillation
+    markdown (``ch01/verified.md``, ``skills/*/SKILL.md``, ``.cangjie/**``)
+    remains an attachment. A bundle without a glance stays searchable with
+    metadata derived from archived filenames and a warning.
 
 ``Misc/<YYYYMMDDTHHMMSS.ffffffZ>/``
     One entry per UTC-timestamp bundle; the single topic-named markdown file is
@@ -26,7 +28,10 @@ evidence table.
     ``.seg/**`` and 要点速览 files are not catalog records.
 
 ``SelfHosted/<id>/``
-    One entry per document bundle (no markdown; metadata from the filename).
+    One entry per document bundle. The catalog record is the
+    ``<source>-glance.md`` file at the bundle root; other files under
+    ``assets/`` are attachments. A bundle without a glance stays searchable
+    with metadata derived from archived filenames and a warning.
 """
 
 from __future__ import annotations
@@ -247,6 +252,10 @@ def catalog_snapshot(root: Path) -> tuple[dict[str, str], dict[str, tuple]]:
                 (parts[0] == "DOI" and is_glance_name(parts[-1]))
                 or (parts[0] in VIDEO_COLLECTIONS and parts[-1] == "summary.md")
             )
+        ) or (
+            len(parts) == 3
+            and parts[0] in {"ISBN", "SelfHosted"}
+            and is_glance_name(parts[-1])
         ):
             files.setdefault(path, "")
 
@@ -615,7 +624,7 @@ class Scanner:
             files = bundles[bundle]
             bundle_rel = f"DOI/{bundle}"
             glances = [p for p in files if p.count("/") == 3 and is_glance_name(p.rsplit("/", 1)[-1])]
-            attachments = self._attachments(files, skip_markdown=True)
+            attachments = self._attachments(files, record=glances[0] if len(glances) == 1 else None)
             if glances:
                 for glance in sorted(glances):
                     entries.append(self._doi_entry(bundle, glance, tracked_map, attachments))
@@ -801,7 +810,7 @@ class Scanner:
             captured_date = date_to_iso(_date_from_misc_id(bundle))
         published_raw = fm.get("published")
         published = date_to_iso(parse_iso_date(published_raw)) or (as_str(published_raw) or None)
-        attachments = self._attachments(files, skip_markdown=True)
+        attachments = self._attachments(files, record=record)
         return Entry(
             entry_id=record,
             collection="Misc",
@@ -957,7 +966,7 @@ class Scanner:
                 "stage": as_str(fm.get("stage")),
                 "bundle_name": parts[-1],
             },
-            attachments=self._attachments(files, skip_markdown=True),
+            attachments=self._attachments(files, record=record),
             warnings=warnings,
         )
 
@@ -966,77 +975,166 @@ class Scanner:
     def _scan_isbn(
         self, tracked: Sequence[str], tracked_map: dict[str, str], diagnostics: list[dict]
     ) -> list[Entry]:
-        bundles: dict[str, list[str]] = {}
-        for path in tracked:
-            parts = path.split("/")
-            if len(parts) > 1 and parts[0] == "ISBN":
-                bundles.setdefault(parts[1], []).append(path)
-        entries: list[Entry] = []
-        for bundle in sorted(bundles):
-            files = bundles[bundle]
-            attachments = self._attachments(files, skip_markdown=True)
-            warnings: list[str] = []
-            if bundle != bundle.strip():
-                warnings.append("book bundle directory name has leading/trailing whitespace")
-            entry = self._derived_entry(
-                collection="ISBN",
-                bundle=f"ISBN/{bundle}",
-                files=files,
-                tracked_map=tracked_map,
-                attachments=attachments,
-                extra={
-                    "isbn": isbn_from_bundle(bundle),
-                    "record_kind": "book-bundle",
-                    "distillation_docs": len([p for p in files if p.endswith(".md")]),
-                },
-                warning=None,
-            )
-            if entry is None:
-                diagnostics.append(
-                    {
-                        "path": f"ISBN/{bundle}",
-                        "severity": "info",
-                        "message": "book bundle without a document attachment",
-                    }
-                )
-                continue
-            entry.warnings.extend(warnings)
-            entries.append(entry)
-        return entries
+        return self._scan_bundles(
+            "ISBN", tracked, tracked_map, diagnostics,
+            kind="book",
+            warning="no glance: book metadata derived from archived filenames",
+            empty_message="book bundle without a document attachment",
+        )
 
     # -- SelfHosted -------------------------------------------------------
 
     def _scan_selfhosted(
         self, tracked: Sequence[str], tracked_map: dict[str, str], diagnostics: list[dict]
     ) -> list[Entry]:
+        return self._scan_bundles(
+            "SelfHosted", tracked, tracked_map, diagnostics,
+            kind="document",
+            warning="no glance: document metadata derived from archived filenames",
+            empty_message="document bundle without an attachment",
+        )
+
+    def _scan_bundles(
+        self,
+        collection: str,
+        tracked: Sequence[str],
+        tracked_map: dict[str, str],
+        diagnostics: list[dict],
+        *,
+        kind: str,
+        warning: str,
+        empty_message: str,
+    ) -> list[Entry]:
+        """Scan ``<Collection>/<bundle>/`` glance records with legacy fallback.
+
+        A bundle whose only records are legacy attachments keeps deriving
+        metadata from archived filenames (warning); markdown there stays out of
+        the attachment list so a distillation document is never mistaken for
+        the book itself.
+        """
         bundles: dict[str, list[str]] = {}
         for path in tracked:
             parts = path.split("/")
-            if len(parts) > 1 and parts[0] == "SelfHosted":
+            if len(parts) > 1 and parts[0] == collection:
                 bundles.setdefault(parts[1], []).append(path)
         entries: list[Entry] = []
         for bundle in sorted(bundles):
             files = bundles[bundle]
+            glances = [p for p in files if p.count("/") == 2 and is_glance_name(p.rsplit("/", 1)[-1])]
+            if glances:
+                legacy = self._attachments(files, exclude=set(glances))
+                for glance in sorted(glances):
+                    entry = self._glance_entry(
+                        collection=collection,
+                        bundle=bundle,
+                        record=glance,
+                        tracked_map=tracked_map,
+                        attachments=legacy,
+                        kind=kind,
+                        extra={"glance_count": len(glances)},
+                    )
+                    if len(glances) > 1:
+                        entry.warnings.append(
+                            f"{len(glances)} glances in one bundle; each is indexed as its own entry"
+                        )
+                    entries.append(entry)
+                if len(glances) > 1:
+                    diagnostics.append(
+                        {
+                            "path": f"{collection}/{bundle}",
+                            "severity": "warning",
+                            "message": f"{len(glances)} glances in one bundle; each is indexed as its own entry",
+                        }
+                    )
+                continue
             entry = self._derived_entry(
-                collection="SelfHosted",
-                bundle=f"SelfHosted/{bundle}",
+                collection=collection,
+                bundle=f"{collection}/{bundle}",
                 files=files,
                 tracked_map=tracked_map,
-                attachments=self._attachments(files, skip_markdown=True),
-                extra={"record_kind": "document"},
-                warning="no markdown record: metadata derived from archived filename",
+                attachments=self._attachments(files),
+                extra={"isbn": isbn_from_bundle(bundle)} if collection == "ISBN" else {},
+                warning=warning,
             )
             if entry is None:
                 diagnostics.append(
-                    {
-                        "path": f"SelfHosted/{bundle}",
-                        "severity": "info",
-                        "message": "document bundle without an attachment",
-                    }
+                    {"path": f"{collection}/{bundle}", "severity": "info", "message": empty_message}
                 )
                 continue
             entries.append(entry)
         return entries
+
+    def _glance_entry(
+        self,
+        *,
+        collection: str,
+        bundle: str,
+        record: str,
+        tracked_map: dict[str, str],
+        attachments: list[Attachment],
+        kind: str,
+        extra: dict,
+    ) -> Entry:
+        """Build an entry from a bundle's ``<source>-glance.md`` record."""
+        text, read_error = self._read(record)
+        front, body, fm_error = split_frontmatter(text)
+        warnings = [message for message in (read_error, fm_error) if message]
+        fm = front or {}
+        fm_title = as_str(fm.get("title"))
+        heading = extract_heading(body)
+        if fm_title:
+            title, title_source = fm_title, "frontmatter"
+        elif heading:
+            title, title_source = heading, "heading"
+        else:
+            title, title_source = self._attachment_title(attachments, bundle), "attachment-filename"
+        authors = as_list(fm.get("authors")) or extract_body_authors(body)
+        if not authors:
+            authors = authors_from_filename(self._primary_document(attachments) or "")
+        captured_date = date_to_iso(parse_iso_date(fm.get("captured")))
+        if not captured_date:
+            warnings.append("no parsable captured date; date-range filters skip this entry")
+        published_raw = fm.get("published")
+        identifiers = {"isbn": isbn_from_bundle(bundle)} if collection == "ISBN" else {}
+        if collection == "SelfHosted":
+            identifiers["id"] = bundle
+        for key in ("isbn", "doi", "pmid", "arxiv_id", "video_id"):
+            value = as_str(fm.get(key))
+            if value:
+                identifiers[key] = value
+        return Entry(
+            entry_id=record,
+            collection=collection,
+            kind=kind,
+            bundle=f"{collection}/{bundle}",
+            record_path=record,
+            revision=self._record_revision(record, tracked_map),
+            revision_kind="record",
+            title=title,
+            title_source=title_source,
+            doi=as_str(fm.get("doi")),
+            work_id=as_str(fm.get("work_id")),
+            version_type=as_str(fm.get("version_type")),
+            journal=as_str(fm.get("publisher")),
+            published=date_to_iso(parse_iso_date(published_raw)) or (as_str(published_raw) or None),
+            captured=as_str(fm.get("captured")) or None,
+            captured_date=captured_date,
+            tags=as_list(fm.get("tags")),
+            authors=authors,
+            identifiers=identifiers,
+            extra={
+                "record_kind": "glance",
+                **extra,
+                "source": as_str(fm.get("source")),
+                "url": as_str(fm.get("url")),
+                "stage": as_str(fm.get("stage")),
+                "publisher": as_str(fm.get("publisher")),
+                "edition": as_str(fm.get("edition")),
+                "language": as_str(fm.get("language")),
+            },
+            attachments=list(attachments),
+            warnings=warnings,
+        )
 
     # -- helpers ----------------------------------------------------------
 
@@ -1115,12 +1213,24 @@ class Scanner:
         self._revision_cache[rel_path] = revision
         return revision
 
-    def _attachments(self, files: Sequence[str], *, skip_markdown: bool) -> list[Attachment]:
+    def _attachments(
+        self,
+        files: Sequence[str],
+        *,
+        record: str | None = None,
+        exclude: set[str] | None = None,
+    ) -> list[Attachment]:
+        """List every tracked file as an attachment except catalog records.
+
+        ``record`` names the bundle's own record (skip it); ``exclude`` drops a
+        whole set of records. Markdown stays an attachment everywhere else: a
+        distillation document is evidence about a bundle, not its record.
+        """
         result: list[Attachment] = []
         for path in files:
-            name = path.rsplit("/", 1)[-1]
-            if skip_markdown and name.endswith(".md"):
+            if path == record or (exclude and path in exclude):
                 continue
+            name = path.rsplit("/", 1)[-1]
             role = attachment_role(name)
             annex_tracked = path in (self._annex_tracked or ())
             present = self._local_present(path)

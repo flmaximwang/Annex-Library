@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 import threading
@@ -346,9 +347,36 @@ def _populate(conn: sqlite3.Connection, scan: ScanResult) -> tuple[int, int, int
 # --------------------------------------------------------------------------- #
 
 
+# Identifiers have no normalised column: the JSON blob is compared as text so
+# that an ISBN matches regardless of where its hyphens fall. ``json.dumps``
+# writes ``{"isbn": "978-0-306-40615-7"}`` (sorted keys, default separators),
+# so upper-casing the blob and dropping spaces and hyphens leaves
+# ``{"ISBN":"9780306406157"}``; quoting the value in the LIKE pattern keeps it
+# a whole-value match, so a suffixed identifier such as
+# ``ISBN-978-0-12-227410-7-C5XKA6VZ`` does not match the bare ISBN. The
+# tradeoff is a per-row scan of ``identifiers_json`` instead of an indexed
+# lookup, which is fine at catalog scale (a few thousand entries); a generated
+# normalised identifier table would be the fix if that ever changes.
+_IDENTIFIERS_NORM = "REPLACE(REPLACE(UPPER(idx.identifiers_json), '-', ''), ' ', '')"
+# The stored value is compared literally: escape LIKE's own wildcards because
+# identifiers do contain them (DOIs carry ``_``, e.g. ``10.1002_smll...``).
+_IDENTIFIERS_MATCH = f"{_IDENTIFIERS_NORM} LIKE ? ESCAPE '\\'"
+
+
+def normalize_identifier(value: str) -> str:
+    """Return the hyphen/space-insensitive form used to match identifiers."""
+    return re.sub(r"[\s-]+", "", str(value)).upper()
+
+
+def _like_literal(value: str) -> str:
+    """Escape LIKE wildcards so an identifier is compared literally."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 @dataclass
 class Query:
     doi: str | None = None
+    isbn: str | None = None
     title: str | None = None
     author: str | None = None
     tags: Sequence[str] = ()
@@ -385,6 +413,9 @@ def search(index: Index, query: Query) -> tuple[list[WorkResult], dict]:
     if query.doi:
         clauses.append("idx.doi_norm = ?")
         params.append(normalize_doi(query.doi))
+    if query.isbn:
+        clauses.append(_IDENTIFIERS_MATCH)
+        params.append(f'%"ISBN":"{_like_literal(normalize_identifier(query.isbn))}"%')
     if query.title:
         terms = [term for term in normalize_text(query.title).split() if term]
         for term in terms:
@@ -417,11 +448,27 @@ def search(index: Index, query: Query) -> tuple[list[WorkResult], dict]:
         clauses.append("idx.kind IN ('glance','misc-note','misc-legacy','video-summary')")
     if query.text:
         terms = [term for term in normalize_text(query.text).split() if term]
+        # Identifiers are not tokenised by ``normalize_text``: an ISBN arrives
+        # hyphenated or spaced, so the raw query and each of its raw tokens are
+        # folded the same way as the JSON blob and compared as whole values.
+        # The disjuncts are OR-ed into every term so that extras like "ISBN" do
+        # not exclude a valid identifier match; tokens without a digit are
+        # skipped because a word like "id" would match every blob carrying an
+        # ``id`` key.
+        identifiers = sorted(
+            {
+                _like_literal(normalize_identifier(part))
+                for part in (query.text, *query.text.split())
+                if any(character.isdigit() for character in part)
+            }
+        )
         for term in terms:
-            clauses.append(
-                "(idx.title_norm LIKE ? OR idx.authors_norm LIKE ? OR idx.tags_norm LIKE ?)"
-            )
+            disjuncts = "(idx.title_norm LIKE ? OR idx.authors_norm LIKE ? OR idx.tags_norm LIKE ?"
             params.extend([f"%{term}%"] * 3)
+            for identifier in identifiers:
+                disjuncts += f" OR {_IDENTIFIERS_MATCH}"
+                params.append(f'%"{identifier}"%')
+            clauses.append(disjuncts + ")")
 
     where = " AND ".join(clauses) if clauses else "1"
     base_sql = f"""
@@ -478,6 +525,7 @@ def search(index: Index, query: Query) -> tuple[list[WorkResult], dict]:
         "limit": query.limit,
         "filters": {
             "doi": query.doi,
+            "isbn": query.isbn,
             "title": query.title,
             "author": query.author,
             "tags": list(query.tags),

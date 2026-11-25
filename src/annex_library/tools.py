@@ -56,6 +56,7 @@ def annex_lib_search(
     manager: IndexManager,
     *,
     doi: str | None = None,
+    isbn: str | None = None,
     title: str | None = None,
     author: str | None = None,
     tags: list[str] | None = None,
@@ -69,12 +70,24 @@ def annex_lib_search(
     include_attachments: bool = True,
 ) -> dict:
     """Search the catalog and return works with their versions and attachments."""
-    if not any([doi, title, author, tags, captured_from, captured_to, collection, text]):
+    if isbn is not None:
+        isbn = isbn.strip() or None
+    if not any([doi, isbn, title, author, tags, captured_from, captured_to, collection, text]):
         raise ToolError(
             "at least one search criterion is required "
-            "(doi, title, author, tags, captured_from/captured_to, collection or text)",
+            "(doi, isbn, title, author, tags, captured_from/captured_to, collection or text)",
             code="invalid_argument",
         )
+    if isbn is not None:
+        digits = isbn.replace("-", "").replace(" ", "").upper()
+        if len(digits) == 10:
+            valid = digits[:9].isdigit() and (digits[9].isdigit() or digits[9] == "X")
+        else:
+            valid = len(digits) == 13 and digits.isdigit()
+        if not valid:
+            raise ToolError(
+                f"isbn is not a 10- or 13-digit ISBN: {isbn!r}", code="invalid_argument"
+            )
     if limit < 1 or limit > 100:
         raise ToolError("limit must be between 1 and 100", code="invalid_argument")
     if offset < 0:
@@ -90,6 +103,7 @@ def annex_lib_search(
 
     query = Query(
         doi=doi,
+        isbn=isbn,
         title=title,
         author=author,
         tags=[tag for tag in (tags or []) if tag and tag.strip()],

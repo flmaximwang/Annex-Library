@@ -15,7 +15,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -255,6 +255,11 @@ def save_record(manager: IndexManager, metadata: dict, staged_files: list[str] |
             collection = "DOI"
         elif "isbn" in fields:
             collection = "ISBN"
+        elif "video_id" in fields:
+            raise WriteError(
+                "invalid_argument",
+                "metadata.collection is required for the video collections",
+            )
         elif isinstance(body, str):
             collection = "Misc"
         else:
@@ -340,10 +345,19 @@ def _plan_attachments(
     root: Path, plan: WritePlan, prefix: str, staged: dict[str, Path], *, record: str
 ) -> None:
     """Plan staged files: markdown as Git text, everything else as annex content."""
+    record_dir = PurePosixPath(record).parent.as_posix()
     for name, source in staged.items():
         path = f"{prefix}/{name}"
         if path == record:
             raise WriteError("conflict", "An attachment name collides with the record", path=path)
+        if is_glance_name(name) and PurePosixPath(path).parent.as_posix() == record_dir:
+            # A glance beside the record would be indexed as a second record for
+            # this bundle, so the catalog would report a collision on every check.
+            raise WriteError(
+                "conflict",
+                "An attachment cannot be named like a catalog record",
+                path=path,
+            )
         dest = _ensure_safe(root, path)
         if dest.exists() or dest.is_symlink():
             _clean_path(root, path)
@@ -429,8 +443,7 @@ def _isbn_bundle(root: Path, isbn: str) -> str:
         if not name.startswith("ISBN-"):
             continue
         candidate = name[5:]
-        candidate_digits = isbn_digits(candidate)
-        if candidate_digits != digits:
+        if isbn_digits(candidate) != digits and not isbn_digits(candidate).startswith(digits):
             continue
         if ISBN_NAME.fullmatch(name):
             matches.append(name)
@@ -483,7 +496,7 @@ def edit_record(
         raise WriteError("invalid_argument", "Expected a Library-relative catalog record path")
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise WriteError("invalid_argument", "Expected the content revision returned by search")
-    immutable = {"doi", "DOI", "id", "pmid", "arxiv_id", "video_id"}
+    immutable = {"doi", "DOI", "id", "pmid", "arxiv_id", "video_id", "isbn"}
     if immutable & field_updates.keys():
         raise WriteError("invalid_argument", "Catalog identifiers are fixed by the archive path")
     return execute_write(

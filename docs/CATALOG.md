@@ -141,10 +141,10 @@ matches any surname component of any author, with diacritics folded
 Identifiers are matched punctuation- and case-insensitively too: the `isbn`
 criterion, and free-text terms that carry a digit, compare the stored
 `identifiers_json` with hyphens, spaces and case removed, so `9780306406157`
-and `978 0 306 40615 7` both find `ISBN/ISBN-978-0-306-40615-7`. A book whose
-bundle has no glance carries no `isbn` identifier (it is derived from the
-filename into `extra`), so it is found by `collection=ISBN` or its title
-instead.
+and `978 0 306 40615 7` both find `ISBN/ISBN-978-0-306-40615-7`. A bundle
+without a glance takes its `isbn` from the directory name, so `isbn` and
+free text find the legacy books as well (the identifier is derived whatever the
+name validates to, because the bundle must stay readable exactly as archived).
 
 ### 10. The index is disposable
 

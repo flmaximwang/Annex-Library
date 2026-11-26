@@ -1155,6 +1155,13 @@ class Scanner:
             return None
         primary = documents[0]
         warnings = [warning] if warning else []
+        identifiers: dict = {}
+        if collection == "ISBN":
+            # A legacy book bundle has no glance, so its directory name is the
+            # only identifier it carries; index it or the isbn criterion can
+            # never find the books that were archived before glances existed.
+            # ``bundle`` arrives either as ``ISBN/<name>`` or as the bare name.
+            identifiers["isbn"] = isbn_from_bundle(bundle.rsplit("/", 1)[-1])
         return Entry(
             entry_id=bundle,
             collection=collection,
@@ -1168,6 +1175,7 @@ class Scanner:
             title=title_from_filename(primary.path),
             title_source="attachment-filename",
             authors=authors_from_filename(primary.path),
+            identifiers=identifiers,
             extra=extra,
             attachments=list(attachments),
             warnings=warnings,

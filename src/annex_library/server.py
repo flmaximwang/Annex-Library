@@ -15,6 +15,7 @@ import sys
 
 from mcp.server.mcpserver import MCPServer
 
+from . import __version__
 from .config import Config
 from .index import Index
 from .refresh import IndexManager
@@ -57,7 +58,7 @@ and tracked attachments (including annex placeholders). Pass
 
 
 def build_server(manager: IndexManager) -> MCPServer:
-    server = MCPServer(SERVICE_NAME, instructions=_INSTRUCTIONS)
+    server = MCPServer(SERVICE_NAME, instructions=_INSTRUCTIONS, version=__version__)
 
     @server.tool(
         name="annex-lib-search",
@@ -229,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def json_status(manager: IndexManager) -> str:
-    return json.dumps(manager.describe(), ensure_ascii=False, indent=2)
+    return json.dumps({"version": __version__, **manager.describe()}, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":  # pragma: no cover

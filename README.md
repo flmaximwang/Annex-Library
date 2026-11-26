@@ -48,6 +48,10 @@ Save and edit return the record locator and local commit SHA on a committed chan
 
 For example, call `annex-lib-search` with `{"title": "conductive protein heme", "include_local_status": true}` to find matching works and include current attachment availability.
 
+## Versions
+
+Releases are tagged `v<version>` and announced on the [releases page](https://github.com/flmaximwang/Annex-Library/releases); the current version also appears in `--status` and in MCP `serverInfo`. Changes are recorded in [CHANGELOG.md](CHANGELOG.md).
+
 ## Tests
 
 ```sh

@@ -164,6 +164,44 @@ def test_legacy_isbn_bundle_without_a_glance_stays_searchable(manager: IndexMana
     ]
 
 
+def test_search_by_isbn_finds_a_legacy_bundle_without_a_glance(tmp_path: Path) -> None:
+    """A pre-glance bundle's directory name is the only identifier it has.
+
+    Regression: derived entries indexed no ``isbn`` identifier at all, so the
+    isbn criterion matched nothing in a real Library, where every book was
+    archived before glances existed (197 bundles, none with a glance).
+    """
+    root = build_fixture(tmp_path / "Library")
+    legacy_isbn = ISBN
+    legacy_bundle = f"ISBN/ISBN-{legacy_isbn}"
+    _write_bytes(root, f"{legacy_bundle}/book.pdf", _pdf_bytes("legacy-book"))
+    _run(root, "annex", "add", f"{legacy_bundle}/book.pdf")
+    _run(root, "commit", "-qm", "fixture: legacy isbn bundle")
+    manager = _manager(root, tmp_path, started=True)
+    try:
+        by_identifier = annex_lib_search(manager, isbn=legacy_isbn)
+        assert by_identifier["total_works"] == 1
+        assert by_identifier["works"][0]["matched_version"] == legacy_bundle
+        version = by_identifier["works"][0]["versions"][0]
+        assert version["record_path"] is None
+        assert version["identifiers"] == {"isbn": legacy_isbn}
+
+        # Hyphenation is irrelevant on either side, and free text matches too.
+        assert annex_lib_search(manager, isbn="9780306406157")["total_works"] == 1
+        assert annex_lib_search(manager, text=legacy_isbn)["total_works"] == 1
+
+        # The fixture book keeps its (checksum-invalid) legacy name: the
+        # identifier is derived from the directory whether or not it validates,
+        # because the bundle must stay readable exactly as archived.
+        books = annex_lib_search(manager, collection="ISBN")["works"]
+        identifiers = {
+            work["versions"][0]["bundle"]: work["versions"][0]["identifiers"] for work in books
+        }
+        assert identifiers[LEGACY_ISBN_BUNDLE] == {"isbn": "978-0-12-457551-X"}
+    finally:
+        manager.stop()
+
+
 # --------------------------------------------------------------------------- #
 # 3. SelfHosted glance with assets and a legacy bundle beside it
 # --------------------------------------------------------------------------- #
